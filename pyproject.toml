@@ -1,0 +1,43 @@
+# EDMS —— 电子元器件库存管理系统
+#
+# 这是一个「应用」而不是「可安装的库」，所以：
+#   · 没有 [build-system]（uv 不会尝试构建项目本体，只装依赖）
+#   · 没有 [project.scripts]（程序入口是 `python -m app.main`，不走包安装）
+#
+# 用 uv 管理环境：
+#     uv sync                 # 建 .venv + 按 uv.lock 装依赖
+#     uv run python -m app.main
+#
+# 没有装 uv 也可以用 pip：
+#     python -m venv .venv
+#     .venv/Scripts/python.exe -m pip install -r requirements.txt
+
+[project]
+name = "edms"
+version = "1.0.0"
+description = "自用、完全本地的电子元器件库存管理系统（托盘常驻 + 全局热键快速查询）"
+readme = "README.md"
+authors = [
+    { name = "Silvanus", email = "378148693@qq.com" }
+]
+requires-python = ">=3.13"
+dependencies = [
+    # 运行期只需要 PySide6。选 Essentials 而不是完整版：
+    # 只用到 QtCore / QtGui / QtWidgets，不需要 WebEngine、3D、Charts，
+    # 装完体积小一半左右。
+    "PySide6-Essentials>=6.9,<7",
+]
+
+[dependency-groups]
+# 开发 / 打包依赖，运行期不需要：`uv sync` 默认包含 dev 组，
+# 只想跑程序可以用 `uv sync --no-dev` 少装一半体积。
+dev = [
+    "pyinstaller>=6.0",
+]
+
+[tool.uv]
+# 受限网络（pip / PyPI 直连被中间人拦截）下也能离线安装：.wheels/ 里存了
+# 全套离线 wheel（PySide6 + shiboken6 + PyInstaller 依赖栈），挂成附加源 ——
+# 有 wheel 就直接用，没有的包仍正常走 PyPI；目录里只有 .gitkeep 时也不影响
+# （clone 后照常走网络安装）。
+find-links = [".wheels"]

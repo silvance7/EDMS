@@ -1,0 +1,14 @@
+# 运行期依赖：只有 PySide6 一个。
+# 选 Essentials 而不是完整版 PySide6，是因为我们只用到
+# QtCore / QtGui / QtWidgets，不需要 WebEngine、3D、Charts 等模块，
+# 装完体积小一半左右。
+PySide6-Essentials>=6.9,<7
+
+# 开发 / 打包依赖（运行期不需要，pip 用户可跳过这行）
+# 打包命令见 README「命令速查」。
+pyinstaller>=6.0
+
+# ─────────────────────────────────────────────────────────────
+# 本文件与 pyproject.toml 的依赖保持一致（改依赖时两边同步）。
+# 用 uv 管理的环境直接 `uv sync` 即可；本文件是给 pip 用户准备的，
+# 精确的版本锁定以 uv.lock 为准。

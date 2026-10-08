@@ -14,7 +14,7 @@
 
 [project]
 name = "edms"
-version = "1.0.0"
+version = "1.0.1"
 description = "自用、完全本地的电子元器件库存管理系统（托盘常驻 + 全局热键快速查询）"
 readme = "README.md"
 authors = [

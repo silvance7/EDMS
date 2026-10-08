@@ -35,6 +35,13 @@ DEFAULTS: dict[str, Any] = {
     # 只决定"怎么填"，不改变库存里存的单颗价格。默认 1 = 和以前的填法一致。
     "last_price_unit": 1,
     "show_tray_notifications": True,
+    # 主窗口左侧「分类」面板是否展开（侧栏折叠按钮切换，跨会话记住）
+    "category_visible": True,
+    # 主窗口的应用内快捷键（QKeySequence PortableText 写法）。
+    # 在设置面板里可改；Esc（清筛选）固定，不在这里。
+    "shortcut_new_part": "Ctrl+N",
+    "shortcut_focus_search": "Ctrl+F",
+    "shortcut_delete_part": "Del",
 }
 
 

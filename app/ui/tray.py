@@ -14,6 +14,7 @@ from PySide6.QtCore import QRectF, Qt, Signal
 from PySide6.QtGui import QAction, QColor, QIcon, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import QMenu, QSystemTrayIcon
 
+from app import config
 from app.paths import resolve_resource
 
 _ICON_CACHE: QIcon | None = None
@@ -82,6 +83,7 @@ class TrayIcon(QSystemTrayIcon):
 
     show_main_requested = Signal()
     quick_search_requested = Signal()
+    settings_requested = Signal()
     quit_requested = Signal()
 
     def __init__(self, hotkey_label: str, parent=None) -> None:
@@ -97,6 +99,10 @@ class TrayIcon(QSystemTrayIcon):
         self.act_main = QAction("打开主窗口", menu)
         self.act_main.triggered.connect(self.show_main_requested.emit)
         menu.addAction(self.act_main)
+
+        self.act_settings = QAction("设置…", menu)
+        self.act_settings.triggered.connect(self.settings_requested.emit)
+        menu.addAction(self.act_settings)
 
         menu.addSeparator()
 
@@ -119,4 +125,8 @@ class TrayIcon(QSystemTrayIcon):
         self.act_quick.setText(f"快速查询（{label}）")
 
     def notify(self, title: str, message: str) -> None:
+        # 气泡开关在设置面板里（settings.json 的 show_tray_notifications）。
+        # 以前这个配置项定义了却没人读，是半成品；现在接通。
+        if not config.get("show_tray_notifications"):
+            return
         self.showMessage(title, message, self.icon(), 3000)

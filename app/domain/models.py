@@ -228,6 +228,10 @@ class SearchQuery:
 
     keyword: str = ""
     category_id: int | None = None      # 含子分类
+    # 只看「未分类」器件（category_id IS NULL）。
+    # 单独一个开关、不用 category_id=-1 哨兵：分类分支对"查无此分类"的
+    # 空 id 列表会**不加条件**，那会变成"返回全部"，静默错得很离谱。
+    uncategorized: bool = False
     footprint: str = ""
     location_id: int | None = None      # 含子位置
     only_low_stock: bool = False

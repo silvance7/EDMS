@@ -128,6 +128,47 @@ def main() -> None:
           created.search_text[:110])
     check("SI 前缀展开带单位 10kΩ", "10kω" in created.search_text)
 
+    # ---- 删除分类参数：级联清值 + 不伤其它参数 + 检索列不留死词 ----
+    print("\nP1 · 删除分类参数（级联清值，不伤其它参数）")
+    own = {t.name: t for t in svc.parts.templates_of_category(sub_id)}
+    check("只列本级定义的参数（不含从父分类继承的）",
+          set(own) == {"温漂"}, str(list(own)))
+
+    temp_id = own["温漂"].id
+    svc.parts.update(svc.parts.get(part_id), {temp_id: 25.0})
+    check("新参数的值进了检索列",
+          "ppm" in svc.parts.get(part_id).search_text,
+          svc.parts.get(part_id).search_text[:120])
+    check("影响面统计 =（器件数, 取值行数）",
+          svc.parts.template_impact(temp_id) == (1, 1),
+          str(svc.parts.template_impact(temp_id)))
+
+    svc.parts.delete_template(temp_id)
+    check("参数模板已删除",
+          svc.db.query_one("SELECT id FROM param_template WHERE id = ?",
+                           (temp_id,)) is None)
+    check("器件上该参数的取值被级联清空",
+          svc.db.query_one("SELECT COUNT(*) AS n FROM part_param "
+                           "WHERE template_id = ?", (temp_id,))["n"] == 0)
+    left_params = {p.name for p in svc.parts.get_params(part_id)}
+    check("同一器件的其它参数不受影响",
+          left_params == {"阻值", "精度", "功率"}, str(left_params))
+    check("可用参数清单里也没有它了",
+          "温漂" not in [t.name for t in
+                         svc.parts.templates_for_category(sub_id)])
+
+    # 删完必须重建检索列 —— 否则 search_text 里留着再也搜不到的死词
+    svc.parts.rebuild_all_search_text()
+    check("重建后检索列不再含已删参数的值",
+          "ppm" not in svc.parts.get(part_id).search_text,
+          svc.parts.get(part_id).search_text[:120])
+
+    try:
+        svc.parts.delete_template(temp_id)       # 已经删过了
+        check("删不存在的参数应报错", False, "居然没报错")
+    except ValueError:
+        check("删不存在的参数会明确报错", True)
+
     # ---------------------------------------------------------------- P1 入库
     print("\nP1 · 入库（批次 + 合并）")
     a1 = next(l for l in svc.tree.list_locations() if l.code == "A1")
@@ -154,6 +195,20 @@ def main() -> None:
     check("按分类树筛选命中", len(svc.search.search(SearchQuery(category_id=resistor.id))) == 1)
     check("按位置筛选命中", len(svc.search.search(SearchQuery(location_id=b2.id))) == 1)
     check("按位置筛选不误命中", len(svc.search.search(SearchQuery(location_id=a1.id))) == 1)
+
+    # 「未分类」筛选：独立开关（不能拿 category_id=-1 去查分类表 ——
+    # 查无此分类时分类分支会"不加条件"，静默返回全部，谁都看不出来）
+    orphan_id = svc.parts.create(Part(name="未分类检索探针"))
+    uncat_hits = svc.search.search(SearchQuery(uncategorized=True))
+    check("未分类筛选命中且不夹带别人",
+          len(uncat_hits) == 1 and uncat_hits[0].id == orphan_id,
+          f"{len(uncat_hits)} 条")
+    check("未分类计数与检索一致",
+          svc.search.count(SearchQuery(uncategorized=True)) == 1)
+    check("分类筛选不会混进未分类器件",
+          all(r.id != orphan_id
+              for r in svc.search.search(SearchQuery(category_id=resistor.id))))
+    svc.parts.delete(orphan_id)     # 别影响后面的清单导出计数
 
     overview = svc.search.quick("10k")[0]
     check("视图聚合总数正确", overview.total_qty == 190, str(overview.total_qty))
@@ -704,7 +759,7 @@ def main() -> None:
     check("开关关闭：库存保持 0", sw_qty == 0, str(sw_qty))
 
     # ---------------------------------------------------------------- 日志
-    print("\n日志：目录 / 分类 / 超量清理")
+    print("\n日志：命名 / 目录 / 分类 / 跨天 / 超量清理")
     from app import log_setup
 
     # log 目录重定向到临时目录，别往真实的 log/ 里写测试垃圾。
@@ -726,27 +781,59 @@ def main() -> None:
         for h in logging.getLogger().handlers:
             h.flush()
 
-        info_text = (fake_log / "info.log").read_text(encoding="utf-8")
-        error_text = (fake_log / "error.log").read_text(encoding="utf-8")
+        today = log_setup._today()
+        info_file = fake_log / f"info.{today}.log"
+        error_file = fake_log / f"error.{today}.log"
+        # 命名铁律：日期在扩展名**之前**（info.2026-10-08.log），
+        # 不能是 TimedRotating 那种 info.log.2026-10-08（日期跑到扩展名后面）
+        check("日志文件名 = 前缀.日期.log（日期在扩展名前）",
+              info_file.exists() and error_file.exists(),
+              f"目录里现有：{sorted(p.name for p in fake_log.glob('*.log'))}")
+        check("不再出现日期在扩展名之后的旧格式",
+              not list(fake_log.glob("*.log.*")))
+        info_text = info_file.read_text(encoding="utf-8")
+        error_text = error_file.read_text(encoding="utf-8")
         check("info 文件含运行日志", "运行日志一条" in info_text)
         check("info 文件也含错误（完整时间线，用户拍板）",
               "错误日志一条" in info_text)
         check("error 文件只含错误（不被运行日志污染）",
               "错误日志一条" in error_text and "运行日志一条" not in error_text)
 
+        # 跨天：把 _today 打桩成"明天"，再写一条 —— 应自动落到新日期的文件
+        real_today = log_setup._today
+        log_setup._today = lambda: "2099-01-02"
+        try:
+            logging.getLogger("edms.test").info("跨天那一条")
+            for h in logging.getLogger().handlers:
+                h.flush()
+        finally:
+            log_setup._today = real_today
+        tomorrow_file = fake_log / "info.2099-01-02.log"
+        check("跨天后自动落到新日期的文件（不用重启）",
+              tomorrow_file.exists()
+              and "跨天那一条" in tomorrow_file.read_text(encoding="utf-8"))
+        check("跨天前的文件不被追写",
+              "跨天那一条" not in info_file.read_text(encoding="utf-8"))
+        log_setup._prune_old_logs()
+
         # 超量清理：造 12 个假的旧日志，断言删到剩 10 且删的是最旧的
         for day in range(1, 13):
-            f = fake_log / f"info.log.2026-01-{day:02d}"
+            f = fake_log / f"info.2026-01-{day:02d}.log"
             f.write_text(f"旧的 {day}", encoding="utf-8")
             stamp = 1_000_000_000 + day * 1000        # mtime 递增，1 号最旧
             os.utime(f, (stamp, stamp))
+        # 旧格式的历史遗留文件：不该被新规则的 glob 误伤
+        legacy = fake_log / "info.log.2026-01-01"
+        legacy.write_text("旧格式", encoding="utf-8")
         log_setup._prune_old_logs()
-        left = sorted(fake_log.glob("info.log.*"))
+        # 总数保留 10 个（今天正在写的 + 跨天那个 + 最新 8 个旧的都算名额）
+        left = sorted(fake_log.glob("info.*.log"))
         check("超量清理后只剩 10 个", len(left) == 10, f"剩 {len(left)} 个")
         check("删的是最旧的（1、2 号没了，12 号还在）",
-              not (fake_log / "info.log.2026-01-01").exists()
-              and not (fake_log / "info.log.2026-01-02").exists()
-              and (fake_log / "info.log.2026-01-12").exists())
+              not (fake_log / "info.2026-01-01.log").exists()
+              and not (fake_log / "info.2026-01-02.log").exists()
+              and (fake_log / "info.2026-01-12.log").exists())
+        check("旧格式历史文件不被误删", legacy.exists())
     finally:
         # 摘掉测试装的 handler：一是别让后续输出混进临时文件，
         # 二是 Windows 上句柄不关，atexit 删临时目录会因文件占用失败

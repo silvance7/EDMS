@@ -257,6 +257,52 @@ class PartService:
             )
             return cur.lastrowid
 
+    def templates_of_category(self, category_id: int) -> list[ParamTemplate]:
+        """**本级自己定义**的参数模板（不含从祖先继承来的）。
+
+        删除操作只能用这个：继承来的参数属于上级分类，定义在那儿，
+        要删也得去那个分类上删 —— 否则会出现"子分类删掉了爹的参数"。
+        """
+        rows = self.db.query(
+            "SELECT * FROM param_template WHERE category_id = ? "
+            "ORDER BY sort_order, name COLLATE NOCASE",
+            (category_id,),
+        )
+        return [ParamTemplate.from_row(r) for r in rows]
+
+    def template_impact(self, template_id: int) -> tuple[int, int]:
+        """删掉这个参数会连带清掉多少东西：`(器件数, 参数值行数)`。
+
+        给确认框用 —— 删参数是不可逆的，界面上必须先说清代价。
+        """
+        row = self.db.query_one(
+            "SELECT COUNT(DISTINCT part_id) AS parts, COUNT(*) AS n_values "
+            "FROM part_param WHERE template_id = ?",
+            (template_id,),
+        )
+        return (int(row["parts"]), int(row["n_values"])) if row else (0, 0)
+
+    def delete_template(self, template_id: int) -> None:
+        """删除参数模板。
+
+        该分类下所有器件已填的对应取值，由 schema 的
+        `part_param.template_id ... ON DELETE CASCADE` 连带清掉 ——
+        留下的孤儿值没人显示、进不了参数筛选，纯垃圾。
+
+        **调用方负责接着 `rebuild_all_search_text()`**：参数值进过检索列，
+        删完不重建，`search_text` 里就留着再也搜不到、也删不掉的死词。
+        """
+        row = self.db.query_one(
+            "SELECT t.name, t.unit, c.name AS cat FROM param_template t "
+            "LEFT JOIN category c ON c.id = t.category_id WHERE t.id = ?",
+            (template_id,),
+        )
+        if row is None:
+            raise ValueError("该参数不存在（可能已经被删掉了）")
+        self.db.execute("DELETE FROM param_template WHERE id = ?", (template_id,))
+        log.warning("删除分类参数「%s」（分类 %s，单位 %s）—— 各器件已填的取值一并清空",
+                    row["name"], row["cat"] or "—", row["unit"] or "—")
+
     # ==================================================================
     #  内部
     # ==================================================================

@@ -83,6 +83,24 @@ def parse_hotkey(spec: str) -> tuple[int, int]:
     return modifiers | MOD_NOREPEAT, vk
 
 
+def validate_hotkey(spec: str) -> str | None:
+    """校验一个全热键描述能不能用；通过返回 None，否则返回错误文案。
+
+    规则：必须可解析；**至少要带一个修饰键**（Ctrl / Alt / Shift / Win）——
+    裸键（比如单个 "Q"）当全局热键会把正常打字全部劫持。
+    parse_hotkey 本身允许裸键（那是给 F6 这类场景留的），所以这层
+    必须单独做，不能拿 parse_hotkey 当校验用。
+    """
+    try:
+        modifiers, _vk = parse_hotkey(spec)
+    except ValueError as exc:
+        return str(exc)
+    bare = modifiers & ~MOD_NOREPEAT
+    if not bare:
+        return "全局热键至少要带一个修饰键（Ctrl / Alt / Shift / Win）"
+    return None
+
+
 class HotkeyFilter(QAbstractNativeEventFilter):
     """接住 WM_HOTKEY 并回调。注册失败时 enabled=False，程序照常运行。"""
 

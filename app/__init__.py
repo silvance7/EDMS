@@ -8,4 +8,7 @@
 依赖方向严格单向：ui -> domain -> storage。
 """
 
-__version__ = "0.1.0"
+# 版本号的**单一来源**：主窗口状态栏显示它。发布新版本时三处同步改：
+# pyproject.toml 的 [project].version、本文件、README 的徽章/下载链接
+# （流程见 progress.md 的「发布新版本」一节）。
+__version__ = "1.1.1"

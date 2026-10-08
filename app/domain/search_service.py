@@ -108,6 +108,12 @@ class SearchService:
                 clauses.append(f"v.category_id IN ({','.join('?' * len(cat_ids))})")
                 params.extend(cat_ids)
 
+        # 「未分类」筛选（主窗口树上的虚拟节点）。必须是独立开关：
+        # 想靠 category_id=-1 走上面的分支的话，查无此分类 → 空列表 → 不加条件
+        # → 返回全部器件，看起来像"筛选坏了"。
+        if q.uncategorized:
+            clauses.append("v.category_id IS NULL")
+
         if q.footprint:
             clauses.append("v.footprint = ?")
             params.append(q.footprint)

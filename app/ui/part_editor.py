@@ -1,10 +1,19 @@
-"""新建 / 编辑器件的对话框。
+"""新建 / 编辑器件的对话框 —— 全项目只有这一套器件表单。
+
+三个入口都用它：主窗口的编辑 / 新建、入库面板的「＋ 新建器件」、
+设置面板「分类管理」页签右栏的器件编辑与新建。入库面板原来那个只收 4 个字段的
+内嵌小表单就是"无属性器件"的来源，已删除。
 
 参数区是**动态**的：选中"电容"就出现容值/耐压/介质，选中"电阻"就换成阻值/精度。
 字段定义来自 param_template，跟具体器件无关——这就是模板继承在界面上的体现。
 
 数值参数用 QLineEdit 而不是 QDoubleSpinBox：spinbox 没法表达"这一项没填"，
 会强行塞个 0 进去，然后 0 就被当成一个真实的规格值存下来了。宁可要空。
+
+分类下拉旁边的「…」打开分类管理（一级/二级，增/重命名/删）。
+"没有合适的分类"不再需要退出表单另找入口 —— 就地建完原地回填。
+
+继承 EnterSafeDialog：回车不会误触发「保存」（根因见 dialog_base.py）。
 """
 
 from __future__ import annotations
@@ -14,7 +23,6 @@ import logging
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QComboBox,
-    QDialog,
     QDialogButtonBox,
     QFormLayout,
     QGroupBox,
@@ -23,29 +31,36 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QMessageBox,
     QPlainTextEdit,
+    QPushButton,
     QSpinBox,
     QVBoxLayout,
     QWidget,
 )
 
+from app.domain import Services
 from app.domain.models import Part
 from app.domain.part_service import PartService
+from app.ui.category_manager import CategoryManagerDialog
+from app.ui.dialog_base import EnterSafeDialog
 
 log = logging.getLogger("edms.ui.part_editor")
 
 
-class PartEditorDialog(QDialog):
+class PartEditorDialog(EnterSafeDialog):
     def __init__(
         self,
         parts: PartService,
         category_labels: list[tuple[int, str]],
         part_id: int | None = None,
         default_category_id: int | None = None,
+        default_name: str = "",
+        services: Services | None = None,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
         self.parts = parts
         self.part_id = part_id
+        self._services = services        # 分类「…」要用（拿不到就藏起入口）
         self._param_editors: dict[str, tuple[QLineEdit, int, str]] = {}
         self._saved_params: dict[str, str] = {}
 
@@ -69,7 +84,23 @@ class PartEditorDialog(QDialog):
         for cid, label in category_labels:
             self.cb_category.addItem(label, cid)
         self.cb_category.currentIndexChanged.connect(self._rebuild_params)
-        form.addRow("分类", self.cb_category)
+        if services is not None:
+            # 分类下拉 + 「…」：没有合适的分类**就地建**（一级/二级），
+            # 建完原地重填下拉、保住当前选中 —— 不用退出表单另找入口。
+            cat_row = QWidget()
+            cat_h = QHBoxLayout(cat_row)
+            cat_h.setContentsMargins(0, 0, 0, 0)
+            cat_h.setSpacing(4)
+            cat_h.addWidget(self.cb_category, 1)
+            btn_manage = QPushButton("…")
+            btn_manage.setFixedWidth(30)
+            btn_manage.setToolTip("管理分类：新增 / 重命名 / 删除（一级 / 二级）")
+            # 包 lambda：clicked 带 bool（同 stock_dialog 里 add_part 的坑）
+            btn_manage.clicked.connect(lambda: self._manage_category())
+            cat_h.addWidget(btn_manage)
+            form.addRow("分类", cat_row)
+        else:
+            form.addRow("分类", self.cb_category)
 
         self.ed_mpn = QLineEdit()
         self.ed_mpn.setPlaceholderText("厂商型号 / 料号，例如 RC0603FR-0710KL")
@@ -137,10 +168,17 @@ class PartEditorDialog(QDialog):
         # ---------------- 装载数据 ----------------
         if part_id is not None:
             self._load(part_id)
-        elif default_category_id is not None:
-            idx = self.cb_category.findData(default_category_id)
-            if idx >= 0:
-                self.cb_category.setCurrentIndex(idx)
+        else:
+            if default_name:
+                # 带出来的名字（例如入库面板搜索框里敲的）直接选中：
+                # 想改就接着敲，想留就直接补别的字段
+                self.ed_name.setText(default_name)
+                self.ed_name.setFocus()
+                self.ed_name.selectAll()
+            if default_category_id is not None:
+                idx = self.cb_category.findData(default_category_id)
+                if idx >= 0:
+                    self.cb_category.setCurrentIndex(idx)
 
         self._rebuild_params()
 
@@ -167,6 +205,34 @@ class PartEditorDialog(QDialog):
         # 这样即使用户中途切换分类再切回来，填过的东西也不会丢。
         for pv in self.parts.get_params(part_id):
             self._saved_params[pv.name] = pv.display
+
+    # ==================================================================
+    #  分类管理（分类行「…」）
+    # ==================================================================
+
+    def _manage_category(self) -> None:
+        if self._services is None:
+            return
+        dlg = CategoryManagerDialog(self._services, self)
+        dlg.exec()
+        if dlg.changed:
+            self._reload_category_combo()
+
+    def _reload_category_combo(self) -> None:
+        """管理完分类后原地重填下拉，尽量保住当前选中的那一个。"""
+        if self._services is None:
+            return
+        current = self.cb_category.currentData()
+        self.cb_category.blockSignals(True)
+        self.cb_category.clear()
+        self.cb_category.addItem("（未分类）", None)
+        for cid, label in build_category_labels(self._services.tree):
+            self.cb_category.addItem(label, cid)
+        idx = self.cb_category.findData(current) if current is not None else 0
+        self.cb_category.setCurrentIndex(idx if idx >= 0 else 0)
+        self.cb_category.blockSignals(False)
+        # 选中的分类可能被删了/改名了，参数区必须按新的选择重建一次
+        self._rebuild_params()
 
     # ==================================================================
     #  动态参数区
@@ -295,3 +361,33 @@ def build_category_labels(tree) -> list[tuple[int, str]]:
     ]
     pairs.sort(key=lambda p: p[1])
     return pairs
+
+
+def confirm_and_delete_part(services: Services, part_id: int,
+                            parent: QWidget | None = None) -> bool:
+    """确认后删除器件（批次 / 参数 / 流水级联删），返回是否真的删了。
+
+    主窗口的「删除」按钮是现在唯一的调用方 ——
+    确认框必须把"连带损失"写清楚：几个批次、多少颗库存、流水一起没。
+    """
+    part = services.parts.get(part_id)
+    if part is None:
+        return False
+
+    total = services.stock.total_quantity(part.id)
+    detail = ""
+    if total:
+        n_lots = len(services.stock.lots(part.id))
+        detail = (f"\n\n它还有 {total} 颗库存分布在 {n_lots} 个批次里，"
+                  f"连同全部出入库流水都会被一起删除。")
+
+    answer = QMessageBox.question(
+        parent, "确认删除",
+        f"确定删除「{part.name}」吗？{detail}\n\n此操作不可撤销。",
+        QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
+    )
+    if answer != QMessageBox.Yes:
+        return False
+
+    services.parts.delete(part.id)
+    return True

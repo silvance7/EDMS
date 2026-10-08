@@ -11,9 +11,20 @@
 from __future__ import annotations
 
 import logging
+import math
 
-from PySide6.QtCore import Qt, QTimer, Signal
-from PySide6.QtGui import QAction, QGuiApplication, QKeySequence
+from PySide6.QtCore import QEvent, QPointF, QSize, Qt, QTimer, Signal
+from PySide6.QtGui import (
+    QAction,
+    QColor,
+    QGuiApplication,
+    QIcon,
+    QKeySequence,
+    QPainter,
+    QPen,
+    QPixmap,
+    QPolygonF,
+)
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QCheckBox,
@@ -33,22 +44,95 @@ from PySide6.QtWidgets import (
     QTableView,
     QTableWidget,
     QTableWidgetItem,
+    QToolButton,
     QTreeWidget,
     QTreeWidgetItem,
     QVBoxLayout,
     QWidget,
 )
 
+from app import config, __version__
 from app.domain import Services
 from app.domain.models import SearchQuery
 from app.ui import format_money, theme
-from app.ui.part_editor import PartEditorDialog, build_category_labels
+from app.ui.part_editor import (
+    PartEditorDialog,
+    build_category_labels,
+    confirm_and_delete_part,
+)
 from app.ui.part_table_model import COLUMNS, PartTableModel
 from app.ui.stock_dialog import StockInDialog, StockOutDialog
+from app.ui.tray import app_icon
 
 log = logging.getLogger("edms.ui.main_window")
 
 ROLE_ID = Qt.UserRole + 1
+
+# 「未分类」虚拟节点的哨兵值。**不是真实分类 id** —— 只挂在树节点上，
+# 选中它时查询走 SearchQuery(uncategorized=True)（不是拿 -1 去查分类表，
+# 那条路会"查无此分类 → 不加条件 → 返回全部"，见 search_service 的注释）。
+UNCATEGORIZED_ID = -1
+
+
+# ===========================================================================
+#  侧栏图标（QPainter 程序化绘制，颜色跟随主题）
+# ===========================================================================
+
+def _make_gear_icon(color: str, size: int = 44) -> QIcon:
+    """齿轮 —— 侧栏「设置」。"""
+    pix = QPixmap(size, size)
+    pix.fill(Qt.transparent)
+    painter = QPainter(pix)
+    painter.setRenderHint(QPainter.Antialiasing, True)
+    pen = QPen(QColor(color))
+    pen.setWidthF(size * 0.085)
+    pen.setCapStyle(Qt.RoundCap)
+    painter.setPen(pen)
+    painter.setBrush(Qt.NoBrush)
+
+    c = size / 2
+    r_in = size * 0.30
+    r_out = size * 0.45
+    for i in range(8):      # 八根齿
+        ang = math.radians(i * 45 - 90)
+        painter.drawLine(
+            QPointF(c + r_in * math.cos(ang), c + r_in * math.sin(ang)),
+            QPointF(c + r_out * math.cos(ang), c + r_out * math.sin(ang)),
+        )
+    body = size * 0.28     # 齿轮体
+    painter.drawEllipse(QPointF(c, c), body, body)
+    hole = size * 0.09     # 中心孔
+    painter.drawEllipse(QPointF(c, c), hole, hole)
+    painter.end()
+    return QIcon(pix)
+
+
+def _make_chevrons_icon(color: str, pointing_left: bool, size: int = 44) -> QIcon:
+    """双箭头 « / » —— 侧栏「折叠 / 展开分类栏」。"""
+    pix = QPixmap(size, size)
+    pix.fill(Qt.transparent)
+    painter = QPainter(pix)
+    painter.setRenderHint(QPainter.Antialiasing, True)
+    pen = QPen(QColor(color))
+    pen.setWidthF(size * 0.085)
+    pen.setCapStyle(Qt.RoundCap)
+    pen.setJoinStyle(Qt.RoundJoin)
+    painter.setPen(pen)
+    painter.setBrush(Qt.NoBrush)
+
+    c = size / 2
+    dx = -1 if pointing_left else 1
+    w = size * 0.15
+    h = size * 0.20
+    for offset in (-size * 0.14, size * 0.14):
+        x = c + offset
+        painter.drawPolyline(QPolygonF([
+            QPointF(x - dx * w, c - h),
+            QPointF(x + dx * w, c),
+            QPointF(x - dx * w, c + h),
+        ]))
+    painter.end()
+    return QIcon(pix)
 
 
 class MainWindow(QMainWindow):
@@ -61,6 +145,11 @@ class MainWindow(QMainWindow):
         super().__init__(parent)
         self.svc = services
         self._selected_part_id: int | None = None
+
+        # 全局热键的读写钩子 —— Controller 在构造完主窗口后注入（见 main.py）；
+        # 单测直接建窗口时拿不到，设置面板的热键区会退化成只读显示。
+        self._hotkey_apply = None
+        self._hotkey_current = None
 
         # 标题带个后缀，避免和文件资源管理器的文件夹名撞车
         # （自动化截图工具按标题子串找窗口时会挑错）
@@ -109,20 +198,141 @@ class MainWindow(QMainWindow):
         outer.setContentsMargins(10, 10, 10, 6)
         outer.setSpacing(8)
 
-        outer.addWidget(self._build_toolbar())
+        # 先搭右列（工具条 + 三栏），再拼最左侧的图标栏 —— 顺序换不得：
+        # 侧栏要按「分类」面板的当前折叠状态去画图标。
+        right_col = QVBoxLayout()
+        right_col.setContentsMargins(0, 0, 0, 0)
+        right_col.setSpacing(8)
+        right_col.addWidget(self._build_toolbar())
 
-        splitter = QSplitter(Qt.Horizontal)
-        splitter.addWidget(self._build_category_pane())
-        splitter.addWidget(self._build_table_pane())
-        splitter.addWidget(self._build_detail_pane())
-        splitter.setStretchFactor(0, 0)
-        splitter.setStretchFactor(1, 1)
-        splitter.setStretchFactor(2, 0)
-        splitter.setSizes([210, 760, 340])
-        outer.addWidget(splitter, 1)
+        self.splitter = QSplitter(Qt.Horizontal)
+        self.category_pane = self._build_category_pane()
+        self.splitter.addWidget(self.category_pane)
+        self.splitter.addWidget(self._build_table_pane())
+        self.splitter.addWidget(self._build_detail_pane())
+        self.splitter.setStretchFactor(0, 0)
+        self.splitter.setStretchFactor(1, 1)
+        self.splitter.setStretchFactor(2, 0)
+        self.splitter.setSizes([210, 760, 340])
+        right_col.addWidget(self.splitter, 1)
+
+        main_row = QHBoxLayout()
+        main_row.setContentsMargins(0, 0, 0, 0)
+        main_row.setSpacing(8)
+        self.side_rail = self._build_side_rail()
+        main_row.addWidget(self.side_rail)
+        main_row.addLayout(right_col, 1)
+        outer.addLayout(main_row, 1)
+
+        # 最底部一栏（状态栏）：**左下角**常驻版本号，右下角是库存统计。
+        # 注意 addPermanentWidget 加的控件一律排在状态栏**右侧**（哪怕先加），
+        # 所以左下角要用 addWidget —— 它落在左侧消息区。程序全程不用
+        # showMessage（状态栏的消息区不会被临时消息顶掉），位置是稳的。
+        self.lbl_version = QLabel(f"v{__version__} @2026")
+        self.lbl_version.setToolTip("程序版本号（app/__init__.py 的 __version__）")
+        self.statusBar().addWidget(self.lbl_version)
 
         self.status_label = QLabel()
         self.statusBar().addPermanentWidget(self.status_label)
+
+        # 折叠状态跨会话记住：上次把「分类」藏了，这次开窗继续藏着
+        self._category_width = 210
+        if config.get("category_visible") is False:
+            self.category_pane.setVisible(False)
+            self.refresh_rail_icons()
+            self._update_collapse_tooltip()
+
+    # ---------------- 左侧边栏（图标栏） ----------------
+
+    def _build_side_rail(self) -> QWidget:
+        """最左侧的常驻窄条：顶部应用图标，底部「设置」「折叠」。
+
+        折叠按钮只控制「分类」面板的显隐（网上常见案例的做法），边栏本身
+        永远在。折叠状态存 settings.json（category_visible），跨会话记住。
+        """
+        rail = QWidget()
+        rail.setObjectName("sideRail")
+        rail.setFixedWidth(46)
+
+        v = QVBoxLayout(rail)
+        v.setContentsMargins(6, 8, 6, 10)
+        v.setSpacing(6)
+
+        logo = QLabel()
+        pix = app_icon().pixmap(26, 26)
+        if not pix.isNull():
+            logo.setPixmap(pix)
+        logo.setAlignment(Qt.AlignCenter)
+        logo.setToolTip("元器件管理 · 本地库存")
+        v.addWidget(logo)
+
+        v.addStretch(1)
+
+        self.btn_rail_settings = QToolButton()
+        self.btn_rail_settings.setObjectName("railButton")
+        self.btn_rail_settings.setAutoRaise(True)
+        self.btn_rail_settings.setIconSize(QSize(22, 22))
+        self.btn_rail_settings.setToolTip("设置：快捷键 / 存储位置 / 分类与器件")
+        self.btn_rail_settings.clicked.connect(lambda: self.open_settings())
+        v.addWidget(self.btn_rail_settings, 0, Qt.AlignHCenter)
+
+        self.btn_rail_collapse = QToolButton()
+        self.btn_rail_collapse.setObjectName("railButton")
+        self.btn_rail_collapse.setAutoRaise(True)
+        self.btn_rail_collapse.setIconSize(QSize(22, 22))
+        self.btn_rail_collapse.clicked.connect(lambda: self.toggle_category_pane())
+        v.addWidget(self.btn_rail_collapse, 0, Qt.AlignHCenter)
+
+        self.refresh_rail_icons()
+        self._update_collapse_tooltip()
+        return rail
+
+    def refresh_rail_icons(self) -> None:
+        """按当前主题与折叠状态重画侧栏图标。
+
+        QPainter 画的图标颜色是烘死的 —— 主题切换后必须重画。
+        （设置面板里切换主题会显式调一次；changeEvent 只是兜底。）
+        """
+        if not hasattr(self, "btn_rail_settings"):
+            return
+        color = theme.pal().fg_muted
+        self.btn_rail_settings.setIcon(_make_gear_icon(color))
+        self.btn_rail_collapse.setIcon(
+            _make_chevrons_icon(color, pointing_left=self._category_pane_visible()))
+
+    def _category_pane_visible(self) -> bool:
+        return not self.category_pane.isHidden()
+
+    def _update_collapse_tooltip(self) -> None:
+        self.btn_rail_collapse.setToolTip(
+            "隐藏「分类」面板" if self._category_pane_visible() else "显示「分类」面板")
+
+    def toggle_category_pane(self) -> None:
+        """折叠 / 展开「分类」面板（侧栏按钮）。
+
+        QSplitter 不会帮你记宽度：隐藏前先记下来，恢复时 setSizes 还原，
+        否则展开后分类栏会塌成 0 宽。状态写进 settings.json，下次开窗沿用。
+        """
+        if self._category_pane_visible():
+            sizes = self.splitter.sizes()
+            if sizes and sizes[0] > 0:
+                self._category_width = sizes[0]
+            self.category_pane.setVisible(False)
+        else:
+            self.category_pane.setVisible(True)
+            sizes = self.splitter.sizes()
+            if len(sizes) >= 3:
+                self.splitter.setSizes([self._category_width, sizes[1], sizes[2]])
+        config.set_value("category_visible", self._category_pane_visible())
+        self.refresh_rail_icons()
+        self._update_collapse_tooltip()
+
+    def changeEvent(self, event) -> None:  # noqa: N802 - 跟随 Qt 命名
+        # 主题切换会换一整套 QPalette → 颜色烘死的图标要重画（兜底路径；
+        # 正常路径是设置面板切主题时显式调 refresh_rail_icons）
+        if event.type() == QEvent.PaletteChange:
+            self.refresh_rail_icons()
+        super().changeEvent(event)
 
     # ---------------- 顶部工具条 ----------------
 
@@ -159,8 +369,9 @@ class MainWindow(QMainWindow):
         self.btn_bom.clicked.connect(self.open_bom_dialog)
         h.addWidget(self.btn_bom)
 
-        # 这里**故意不放「新建器件」按钮** —— 建器件的正路是走入库面板
-        # （搜不到就现场建）。纯建档（库存 0）的需求放在表格右键菜单里，不占地方。
+        # 这里**故意不放「新建器件」/「设置」按钮**：建器件的正路是走入库面板
+        # 的「＋ 新建器件」；纯建档（库存 0）在表格右键菜单里；设置走左侧
+        # 边栏的 ⚙（和托盘菜单）—— 工具条不占这些地方。
 
         return bar
 
@@ -232,7 +443,10 @@ class MainWindow(QMainWindow):
 
         self.btn_del = QPushButton("删除")
         self.btn_del.setProperty("danger", True)
-        self.btn_del.clicked.connect(self.delete_selected_part)
+        # 包 lambda 两个原因：① clicked 带一个 bool，不能让它落进 notify 形参
+        # （项目坑 #14：静默失效）；② 按钮路径"没选中要给提示"，Delete 键路径
+        # 保持安静（见 delete_selected_part 的 notify 参数）
+        self.btn_del.clicked.connect(lambda: self.delete_selected_part(notify=True))
         ah.addWidget(self.btn_del)
 
         ah.addStretch(1)
@@ -301,25 +515,64 @@ class MainWindow(QMainWindow):
     # ---------------- 快捷键 ----------------
 
     def _build_shortcuts(self) -> None:
-        new_act = QAction(self)
-        new_act.setShortcut(QKeySequence("Ctrl+N"))
-        new_act.triggered.connect(self.new_part)
-        self.addAction(new_act)
-
-        focus_act = QAction(self)
-        focus_act.setShortcut(QKeySequence("Ctrl+F"))
-        focus_act.triggered.connect(lambda: (self.ed_search.setFocus(), self.ed_search.selectAll()))
-        self.addAction(focus_act)
-
-        del_act = QAction(self)
-        del_act.setShortcut(QKeySequence("Delete"))
-        del_act.triggered.connect(self.delete_selected_part)
-        self.addAction(del_act)
+        """应用内快捷键 —— 从 settings.json 读（设置面板里可改）；Esc 固定不配。"""
+        self._act_new = self._make_shortcut("shortcut_new_part", self.new_part)
+        self._act_focus = self._make_shortcut(
+            "shortcut_focus_search",
+            lambda: (self.ed_search.setFocus(), self.ed_search.selectAll()))
+        # 包 lambda：triggered 带 bool，别让它落进 delete_selected_part 的
+        # notify 形参（坑 #14）。快捷键路径保持静默（notify=False）。
+        self._act_del = self._make_shortcut(
+            "shortcut_delete_part", lambda: self.delete_selected_part(notify=False))
 
         esc_act = QAction(self)
         esc_act.setShortcut(QKeySequence("Esc"))
         esc_act.triggered.connect(self._clear_filters)
         self.addAction(esc_act)
+
+    def _make_shortcut(self, config_key: str, slot) -> QAction:
+        act = QAction(self)
+        act.setShortcut(QKeySequence(config.get(config_key) or ""))
+        act.triggered.connect(slot)
+        self.addAction(act)
+        return act
+
+    def apply_inapp_shortcuts(self, new_part: str, focus_search: str,
+                              delete_part: str) -> tuple[bool, str]:
+        """设置面板「应用」调用：校验后写入 QAction + settings.json。
+
+        校验：不能为空、三个之间不能重复；不带修饰键的单个字母/数字会
+        劫持输入框打字 —— 允许但返回警告（调用方直接显示），不拦。
+        """
+        specs = {"新建器件": new_part or "", "聚焦搜索": focus_search or "",
+                 "删除器件": delete_part or ""}
+        seqs: dict[str, QKeySequence] = {}
+        for label, spec in specs.items():
+            seq = QKeySequence(spec.strip())
+            if seq.isEmpty():
+                return False, f"「{label}」的快捷键是空的，先录一个再应用。"
+            seqs[label] = seq
+
+        texts = {label: seq.toString(QKeySequence.PortableText)
+                 for label, seq in seqs.items()}
+        if len(set(texts.values())) != len(texts):
+            return False, "三个快捷键之间有重复的，错开再试。"
+
+        self._act_new.setShortcut(seqs["新建器件"])
+        self._act_focus.setShortcut(seqs["聚焦搜索"])
+        self._act_del.setShortcut(seqs["删除器件"])
+        config.set_value("shortcut_new_part", texts["新建器件"])
+        config.set_value("shortcut_focus_search", texts["聚焦搜索"])
+        config.set_value("shortcut_delete_part", texts["删除器件"])
+
+        bare = [f"「{label}」({texts[label]})" for label in texts
+                if "+" not in texts[label] and len(texts[label]) == 1
+                and texts[label].isalnum()]
+        msg = "快捷键已生效并保存。"
+        if bare:
+            msg += ("\n注意：" + "、".join(bare) + " 没有修饰键，"
+                    "打字时会先被快捷键吃掉，建议加上 Ctrl / Alt。")
+        return True, msg
 
     # ==================================================================
     #  数据刷新
@@ -355,6 +608,16 @@ class MainWindow(QMainWindow):
             return count
 
         add_children(root, None)
+
+        # 「未分类」虚拟节点：只在真的有未分类器件时出现（误建 / 暂未归置的
+        # 都在这儿兜着）。哨兵 UNCATEGORIZED_ID 挂在节点上，查询走
+        # SearchQuery(uncategorized=True) —— 别拿 -1 去查分类表。
+        n_uncat = self.svc.search.count(SearchQuery(uncategorized=True))
+        if n_uncat:
+            node = QTreeWidgetItem([f"未分类（{n_uncat}）"])
+            node.setData(0, ROLE_ID, UNCATEGORIZED_ID)
+            root.addChild(node)
+
         self.tree.expandAll()
         self.tree.blockSignals(False)
 
@@ -400,7 +663,11 @@ class MainWindow(QMainWindow):
 
         return SearchQuery(
             keyword=self.ed_search.text().strip(),
-            category_id=cat_id,
+            # 哨兵 -1 = 「未分类」虚拟节点：不能当真实分类 id 传下去
+            # （分类分支遇到"查无此分类"会不加条件 → 返回全部）
+            category_id=cat_id if (cat_id is not None
+                                   and cat_id != UNCATEGORIZED_ID) else None,
+            uncategorized=(cat_id == UNCATEGORIZED_ID),
             footprint=self.cb_footprint.currentData() or "",
             only_low_stock=self.chk_low.isChecked(),
             limit=2000,
@@ -665,28 +932,29 @@ class MainWindow(QMainWindow):
             self.reload_all()
             self._show_detail(self._selected_part_id)
 
-    def delete_selected_part(self) -> None:
-        if self._selected_part_id is None or not self.table.selectionModel().selectedRows():
-            return
-        part = self.svc.parts.get(self._selected_part_id)
-        if part is None:
+    def delete_selected_part(self, notify: bool = False) -> None:
+        """删除详情面板当前对应的器件。
+
+        `notify=True` 给按钮路径用：没选中时弹一句提示，不做"沉默的按钮"；
+        Delete 快捷键路径保持静默（notify=False，默认）。
+
+        删除目标以 `_selected_part_id` 为准，**不再要求表格里也有选中行**：
+        入库后器件可能被当前筛选挡住（表格里看不到），但详情面板的
+        编辑 / 删除必须还能用 —— 这里曾经因为"双守卫"静默失效过。
+        """
+        # 防信号把非 bool 值塞进 notify 形参（项目坑 #14 的同类问题）
+        if not isinstance(notify, bool):
+            notify = False
+
+        part_id = self._selected_part_id
+        if part_id is None:
+            if notify:
+                QMessageBox.information(self, "没有选中器件", "请先在列表里选一个器件。")
             return
 
-        total = self.svc.stock.total_quantity(part.id)
-        detail = f"\n\n它还有 {total} 颗库存分布在 {len(self.svc.stock.lots(part.id))} 个批次里，" \
-                 f"连同全部出入库流水都会被一起删除。" if total else ""
-
-        answer = QMessageBox.question(
-            self,
-            "确认删除",
-            f"确定删除「{part.name}」吗？{detail}\n\n此操作不可撤销。",
-            QMessageBox.Yes | QMessageBox.No,
-            QMessageBox.No,
-        )
-        if answer != QMessageBox.Yes:
+        if not confirm_and_delete_part(self.svc, part_id, self):
             return
 
-        self.svc.parts.delete(part.id)
         self._selected_part_id = None
         self.reload_all()
         self._clear_detail()
@@ -703,9 +971,13 @@ class MainWindow(QMainWindow):
 
         dlg = StockInDialog(self.svc, self, preset_part_id=preset_part_id)
         if dlg.exec():
+            # 先记下：reload 时表格能选中就选中；被当前筛选挡住也没关系 ——
+            # 下面再断言一次，详情 / 编辑 / 删除都认 _selected_part_id
+            # （_reload_table 会把找不到的目标行清成 None，那个坑已经踩过）
             self._selected_part_id = dlg.part_id
             self.reload_all()
             if dlg.part_id is not None:
+                self._selected_part_id = dlg.part_id
                 self._show_detail(dlg.part_id)
 
     def stock_out(self, preset_part_id: int | None = None) -> None:
@@ -783,11 +1055,12 @@ class MainWindow(QMainWindow):
         act_new_sub = menu.addAction("新建子分类")
         if cat_id is not None:
             act_add_param = menu.addAction("为该分类添加参数…")
+            act_del_param = menu.addAction("删除该分类的参数…")
             menu.addSeparator()
             act_rename = menu.addAction("重命名")
             act_delete = menu.addAction("删除分类")
         else:
-            act_add_param = act_rename = act_delete = None
+            act_add_param = act_del_param = act_rename = act_delete = None
 
         chosen = menu.exec(self.tree.viewport().mapToGlobal(pos))
         if chosen is None:
@@ -797,6 +1070,8 @@ class MainWindow(QMainWindow):
             self._create_subcategory(cat_id)
         elif act_add_param is not None and chosen is act_add_param:
             self._add_param_template(cat_id)
+        elif act_del_param is not None and chosen is act_del_param:
+            self._delete_param_template(cat_id)
         elif act_rename is not None and chosen is act_rename:
             self._rename_category(cat_id, item.text(0))
         elif act_delete is not None and chosen is act_delete:
@@ -866,9 +1141,103 @@ class MainWindow(QMainWindow):
             f"已重建 {new_count} 个器件的检索索引。",
         )
 
+    def _delete_param_template(self, cat_id: int) -> None:
+        """删除该分类自己定义的某个参数。
+
+        三件事都是不可逆的，确认框必须**先说清代价**再动手：
+            ① 各器件上已填的该参数值会被级联清空；
+            ② 子分类（及其器件表单）会少掉这个字段；
+            ③ 检索索引要重建（否则 search_text 里留着死词）。
+        继承来的参数不在这里删 —— 它属于定义它的上级分类。
+        """
+        cat_name = self.svc.tree.category_path(cat_id) or str(cat_id)
+        own = self.svc.parts.templates_of_category(cat_id)
+        if not own:
+            inherited = self.svc.parts.templates_for_category(cat_id)
+            got = ("、".join(t.name for t in inherited) if inherited else "（一个都没有）")
+            QMessageBox.information(
+                self, "这个分类没有自己的参数",
+                f"「{cat_name}」自己没有定义任何参数。\n\n"
+                f"它现在用的是上级分类继承来的：{got}\n\n"
+                f"要删继承来的参数，请到定义它的那个分类上右键删除。",
+            )
+            return
+
+        labels = [f"{t.name}（{t.unit}）" if t.unit else t.name for t in own]
+        choice, ok = QInputDialog.getItem(
+            self, "删除分类参数", f"「{cat_name}」下要删除哪个参数：",
+            labels, 0, False)
+        if not ok:
+            return
+        tpl = own[labels.index(choice)]
+
+        n_parts, n_values = self.svc.parts.template_impact(tpl.id)
+        n_kids = max(len(self.svc.tree.category_ids_with_children(cat_id)) - 1, 0)
+        msg = f"删除参数「{tpl.name}」？\n\n"
+        if n_values:
+            msg += (f"· {n_parts} 个器件上已填的 {n_values} 处取值会被**一起清空**"
+                    f"（清空后这些器件的表单里就没有这一项了）\n")
+        else:
+            msg += "· 目前还没有器件填过这个参数，不会有取值被清掉\n"
+        if n_kids:
+            msg += f"· 它的 {n_kids} 个子分类会少掉这个字段\n"
+        msg += "· 器件本身、库存、其它参数都不受影响\n\n此操作不可撤销，继续吗？"
+        if QMessageBox.question(self, "确认删除参数", msg,
+                                QMessageBox.Yes | QMessageBox.No,
+                                QMessageBox.No) != QMessageBox.Yes:
+            return
+
+        try:
+            self.svc.parts.delete_template(tpl.id)
+        except Exception as exc:  # noqa: BLE001
+            log.exception("删除分类参数失败")
+            QMessageBox.warning(self, "删除失败", str(exc))
+            return
+
+        # 参数值进过检索列 —— 删完必须重建，否则搜"10k"还能搜到已删的值
+        n_rebuilt = self.svc.parts.rebuild_all_search_text()
+        self._reload_table()
+        if self._selected_part_id is not None:
+            self._show_detail(self._selected_part_id)   # 详情面板的参数区要跟着少一行
+        QMessageBox.information(
+            self, "已删除",
+            f"参数「{tpl.name}」已删除"
+            + (f"，{n_parts} 个器件上的 {n_values} 处取值一并清空。\n" if n_values else "。\n")
+            + f"\n已重建 {n_rebuilt} 个器件的检索索引。",
+        )
+
     # ==================================================================
     #  外部调用
     # ==================================================================
+
+    def set_hotkey_hooks(self, apply_fn, current_label_fn) -> None:
+        """Controller 注入：设置面板改全局热键时用。
+
+        没被注入（比如单测直接建窗口）时，设置面板的热键区退化为只读显示。
+        """
+        self._hotkey_apply = apply_fn
+        self._hotkey_current = current_label_fn
+
+    def open_settings(self) -> None:
+        """打开设置面板（侧栏 ⚙ / 托盘菜单）。
+
+        延迟 import：设置面板只在真正打开时才加载，不给启动路径添负担
+        （和 BOM 对话框同一个思路）。
+        """
+        from app.ui.settings_dialog import SettingsDialog
+
+        dlg = SettingsDialog(
+            self.svc,
+            self,
+            hotkey_apply=self._hotkey_apply,
+            hotkey_current=self._hotkey_current,
+        )
+        dlg.exec()
+        if dlg.parts_changed:
+            # 设置里可能改了器件 / 分类：整体刷新，详情保持原目标
+            self.reload_all()
+            if self._selected_part_id is not None:
+                self._show_detail(self._selected_part_id)
 
     def focus_search(self) -> None:
         """被托盘或全局热键唤起时调用：把窗口带到前台并聚焦搜索框。"""

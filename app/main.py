@@ -45,6 +45,8 @@ FALLBACK_HOTKEYS = [
     "ctrl+alt+j",
 ]
 
+log = logging.getLogger("edms.controller")
+
 
 class Controller:
     """把各个部件串起来。持有引用，防止被 GC 回收。"""
@@ -60,6 +62,7 @@ class Controller:
         self.tray = TrayIcon(self.hotkey_label())
         self.tray.quick_search_requested.connect(self.toggle_quick)
         self.tray.show_main_requested.connect(self.show_main)
+        self.tray.settings_requested.connect(self.show_settings)
         self.tray.quit_requested.connect(self.quit)
         self.tray.show()
 
@@ -81,7 +84,7 @@ class Controller:
                     self.tray.notify(
                         "已自动换用其它热键",
                         f"{first_error}。\n\n已改用 {self.hotkey_label()}。\n"
-                        f"想固定下来，就改 data/settings.json 里的 hotkey。",
+                        f"想换成别的组合，在「设置」（主窗口左侧边栏 ⚙）里改。",
                     )
                     break
             else:
@@ -111,18 +114,37 @@ class Controller:
         return self._quick
 
     def toggle_quick(self) -> None:
-        self._ensure_quick().toggle()
+        try:
+            quick = self._ensure_quick()
+        except Exception:  # noqa: BLE001 - 同 _ensure_main_guarded：别把托盘拖死
+            self._quick = None
+            log.exception("快速查询浮窗构造失败")
+            self.tray.notify("快速查询打开失败", "详情见 log/error.log。")
+            return
+        quick.toggle()
 
     # ==================================================================
     #  惰性构造主窗口
     # ==================================================================
 
     def _ensure_main(self):
+        """构造主窗口（需要时）。**构造失败会抛出** —— 界面入口请走
+        `_ensure_main_guarded`（让一次窗口构造失败连累整个托盘是设计事故）；
+        只有 --check 直接调本方法：它是诊断路径，失败就该响亮地报出来。
+
+        懒加载的边界（2026-10-08 事故复盘）：主窗口在"第一次点开"时才
+        import。如果程序是带着**旧代码**起的进程、之后磁盘上的代码被更新过，
+        这里会把新模块和旧内存模块拼在一起（症状：TypeError、主窗口怎么都
+        打不开，而托盘还在）—— 正确的解法是退出重开；代码侧只负责兜底提示，
+        见 `_ensure_main_guarded`。
+        """
         if self._main_window is None:
             # 延迟 import：避免在没有打开主窗口的情况下也去解析这一大坨模块
             from app.ui.main_window import MainWindow
 
             self._main_window = MainWindow(self.svc)
+            # 设置面板里换全局热键要靠这两个钩子（没注入时热键区只读显示）
+            self._main_window.set_hotkey_hooks(self._apply_hotkey, self.hotkey_label)
             self._main_window.hidden_to_tray.connect(
                 lambda _msg: self.tray.notify(
                     "仍在后台运行", f"按 {self.hotkey_label()} 可随时快速查询。"
@@ -133,16 +155,72 @@ class Controller:
             )
         return self._main_window
 
+    def _ensure_main_guarded(self):
+        """界面入口专用：构造失败时弹托盘气泡、保住托盘，别静默变砖。
+
+        PySide6 对槽里未捕获异常只是记日志继续跑 —— 用户看到的就是
+        "点了没反应/主窗口打不开"，毫无线索。这里兜住并给出可执行指引。
+        """
+        try:
+            return self._ensure_main()
+        except Exception:  # noqa: BLE001 - 最后一道防线
+            self._main_window = None
+            log.exception("主窗口构造失败")
+            self.tray.notify(
+                "主窗口打开失败",
+                "详情见 log/error.log。\n"
+                "若是刚更新过程序：请从托盘菜单「退出」后重新打开"
+                "（懒加载会把新旧代码拼在一起，重启即恢复）。",
+            )
+            return None
+
     def show_main(self) -> None:
-        win = self._ensure_main()
+        win = self._ensure_main_guarded()
+        if win is None:
+            return
         win.showNormal()
         win.raise_()
         win.activateWindow()
         win.focus_search()
 
+    def show_settings(self) -> None:
+        """托盘菜单「设置…」：把主窗口带到前台，再打开设置面板。"""
+        win = self._ensure_main_guarded()
+        if win is None:
+            return
+        win.showNormal()
+        win.raise_()
+        win.activateWindow()
+        win.open_settings()
+
+    def _apply_hotkey(self, spec: str) -> tuple[bool, str]:
+        """设置面板换绑全局热键：先注销旧的 → 注册新的。
+
+        成功：更新生效值、托盘标签、写回 settings.json。
+        失败：**把旧热键注册回来**（别把用户现有功能也弄丢），返回原因。
+        """
+        old = self.hotkey_spec
+        self.hotkey.unregister()
+        if self.hotkey.register(spec):
+            self.hotkey_spec = spec
+            self.tray.set_hotkey_label(self.hotkey_label())
+            config.set_value("hotkey", spec)
+            return True, f"已生效：{self.hotkey_label()}"
+
+        reason = self.hotkey.error
+        self.hotkey.unregister()
+        if old and self.hotkey.register(old):
+            self.hotkey_spec = old
+            kept = f"原热键已保留（{self.hotkey_label()}）。"
+        else:
+            kept = "原热键也恢复失败了，可点托盘图标唤起快速查询。"
+        return False, f"换绑失败：{reason}。{kept}"
+
     def open_part_in_main(self, part_id: int) -> None:
         """从浮窗回车进入：打开主窗口并把该器件选中。"""
-        win = self._ensure_main()
+        win = self._ensure_main_guarded()
+        if win is None:
+            return
         win.showNormal()
         win.raise_()
         win.activateWindow()

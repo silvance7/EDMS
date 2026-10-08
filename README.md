@@ -8,11 +8,11 @@
 
 **A Fully Local Electronic Component Inventory Manager for Windows 10 / 11**
 
-[![Release Version](https://img.shields.io/badge/Release-v1.0.1-2563EB.svg?style=flat-square&logo=github)](https://github.com/silvance7/EDMS/releases)
+[![Release Version](https://img.shields.io/badge/Release-v1.1.1-2563EB.svg?style=flat-square&logo=github)](https://github.com/silvance7/EDMS/releases)
 [![Platform](https://img.shields.io/badge/Platform-Windows%2010%20%7C%2011-0078D4.svg?style=flat-square&logo=windows)]
 [![Python](https://img.shields.io/badge/Python-3.13-3776AB.svg?style=flat-square&logo=python&logoColor=white)](https://www.python.org/)
 [![GUI](https://img.shields.io/badge/GUI-PySide6%206.9-41CD52.svg?style=flat-square&logo=qt&logoColor=white)](https://www.qt.io/)
-[![Tests](https://img.shields.io/badge/Tests-367%20Passed-success.svg?style=flat-square&logo=pytest)]
+[![Tests](https://img.shields.io/badge/Tests-423%20Passed-success.svg?style=flat-square&logo=pytest)]
 [![Network](https://img.shields.io/badge/Network-100%25%20Offline-8B5CF6.svg?style=flat-square&logo=wifi&logoColor=white)]
 [![License](https://img.shields.io/badge/License-MIT-10B981.svg?style=flat-square)](LICENSE)
 
@@ -46,8 +46,8 @@
 | 冷启动到托盘就绪 | **44 ms** | 含建库、迁移、注册全局热键 |
 | 纯托盘常驻内存 | **64 MB** | 日常使用中的状态 |
 | 主窗口打开后 | 140 MB | 按需加载，关闭后回落 |
-| 打包产物 | 61 MB | 绿色便携版，含全部运行时 |
-| 数据库体积 | 124 KB | 20 个器件 / 21 个批次 |
+| 打包产物 | 62 MB | 绿色便携版，含全部运行时 |
+| 数据库体积 | 140 KB | 20 个器件 / 21 个批次 |
 
 > 64 MB 不是天然如此：快速查询浮窗最初在启动时构造，常驻内存 118 MB；改为**首次按热键时才构造**后降到 64 MB。主窗口同样懒加载 —— 常驻进程里不含任何「可能用不到」的界面对象。
 
@@ -82,10 +82,11 @@ Windows 上 `Ctrl+Alt+字母` 这类组合容易被其它程序抢占（输入�
 
 1. 先试 `data/settings.json` 里配置的 `hotkey`（默认 `ctrl+alt+e`，E 取 Element / 元件）；
 2. 失败则按内置候选链依次尝试：`ctrl+alt+e` → `ctrl+alt+q` → `ctrl+alt+d` → `ctrl+alt+w` → `ctrl+alt+j`（与已配置组合相同的一档会跳过）；
-3. 降级成功后**托盘弹气泡提示实际生效的组合**，以及如何将它固定下来；
+3. 降级成功后**托盘弹气泡提示实际生效的组合**；
 4. 全部被占用时停用热键并给出提示，此时仍可点击托盘图标唤起快速查询。
 
-**固定热键**：修改 `data/settings.json` 的 `hotkey` 字段即可，格式如 `ctrl+shift+f9`（大小写随意）——
+**改热键**：打开主窗口左侧边栏的「设置 → 常规 → 全局热键」，直接按下想用的组合（如 `Ctrl+Shift+F9`）再点「应用」，**立即生效**（注册失败会提示并保留原热键）；
+也可以手改 `data/settings.json` 的 `hotkey` 字段（格式如 `ctrl+shift+f9`，大小写随意）——
 修饰键支持 `ctrl` / `alt` / `shift` / `win`，主键支持字母、数字、`F1`-`F24`，以及 `space` / `tab` / 方向键等常见名称。
 
 **检测某个组合是否被占用**：直接尝试注册一次最可靠，失败且错误码为 `1409`（`ERROR_HOTKEY_ALREADY_REGISTERED`）即代表已被其它程序注册：
@@ -123,7 +124,7 @@ part（物料主数据）        一个「10kΩ 0603 1% 电阻」就是一条 pa
 
 **厂商（生产商）同样记录在批次上**：同一个 10kΩ 电阻，不同厂牌属于同一条器件记录的两条采购批次，更换厂牌无需新建器件。
 
-主界面由分类树、器件表格与详情面板三栏构成；表格中缺货标红、低库存标黄，详情面板展示规格参数、库存批次（可右键修正价格 / 盘点 / 删除）与出入库流水。
+主界面 = **左侧图标栏**（折叠「分类」面板、打开「设置」）+ 分类树 / 器件表格 / 详情面板三栏：表格中缺货标红、低库存标黄，详情面板展示规格参数、库存批次（可右键修正价格 / 盘点 / 删除）与出入库流水；未分类的器件集中显示在树上的「未分类」节点里，随时可归置；状态栏左侧常驻版本号（`v1.1.1 @2026`）。分类节点右键可新建子分类、重命名、删除，以及**增删该分类的规格参数**。
 
 <div align="center">
   <img src="./attachments/main_window.png" width="760" alt="主窗口：分类树 + 器件清单 + 详情面板" />
@@ -133,9 +134,9 @@ part（物料主数据）        一个「10kΩ 0603 1% 电阻」就是一条 pa
 
 ### 3. 📥 入库 / 出库
 
-**入库面板不要求先在表格里选器件**：面板顶部即搜索框，搜到直接选中，搜不到则现场新建器件完成入库。
+**入库面板不要求先在表格里选器件**：面板顶部即搜索框，搜到直接选中；搜不到就点「＋ 新建器件」打开完整器件表单（分类 / 型号 / 封装 / 参数 / 关键词都能填），建完自动选中、接着填入库资料。
 
-- 入库资料：**数量 / 存放位置 / 单价 / 购买日期 / 厂商 / 供应商 / 备注**；
+- 入库分两步：**① 选器件 → ② 入库资料**（数量 / 存放位置 / 单价 / 购买日期 / 厂商 / 供应商 / 备注）；回车键不会误提交，只有明确点击「入库」才落库；
 - 单价支持按报价单位输入（元/颗、元/百颗、元/千颗），按倍率换算后落库，照报价单口径填写不出错；
 - 位置 + 单价 + 日期 + 厂商 + 供应商完全相同的采购会自动合并为一个批次，连续录入不堆重复记录；
 - 出库支持**一次多个器件**，默认按先进先出（FIFO：购买日期早的先出），也可指定批次扣减；
@@ -182,13 +183,14 @@ part（物料主数据）        一个「10kΩ 0603 1% 电阻」就是一条 pa
 参数以**模板 + 取值**两表存储，模板按分类继承——电阻才有「阻值」，电容才有「容值」。
 
 - 支持按参数范围筛选（如 `阻值 10k~100k` 搭配封装 `0603`），而不是在描述字符串上做模糊匹配；
+- 分类节点右键 →「为该分类添加参数…」新增字段；**「删除该分类的参数…」** 可移除不再需要的字段——确认框会先算清代价（多少器件上的多少处取值会被一并清空、子分类会少哪些字段），删除后检索索引自动重建，同器件的其它参数与库存不受影响；从上级分类继承来的参数需到定义它的那个分类上删除；
 - 检索词归一化：封装统一（`C0603` ≡ `0603`）、数值统一（`0.1uF` ≡ `100nF`）、SI 前缀展开（`1k` ≡ `1000`）。
 
-> 参数模板变动后检索索引会自动重建（通过界面增删参数时触发）；需要手工重建时可调用 `PartService.rebuild_all_search_text()`。
+> 参数模板变动后检索索引会自动重建（界面上增删参数时触发）；需要手工重建时可调用 `PartService.rebuild_all_search_text()`。
 
 ### 6. 🌗 浅色 / 深色主题
 
-默认跟随系统深浅色实时切换，也可在 `data/settings.json` 中用 `theme: auto | light | dark` 固定。
+默认跟随系统深浅色实时切换，也可在主窗口「设置 → 常规 → 其它」或 `data/settings.json`（`theme: auto | light | dark`）中固定。
 
 <div align="center">
   <img src="./attachments/theme_compare.png" width="700" alt="浅色 / 深色两套主题" />
@@ -198,23 +200,32 @@ part（物料主数据）        一个「10kΩ 0603 1% 电阻」就是一条 pa
 
 - 全部数据保存在程序旁边的 `data/inventory.db` 单文件中，**复制该文件即完成备份**（建议连同 `-wal` 文件一起，或先退出程序）；
 - 程序内置在线热备份能力，生成的快照不会取到写了一半的数据；
-- 运行日志保存在 `log/`（完整时间线 + 纯报错两份，按天滚动、各保留 10 天），业务动作可追溯。
+- 运行日志保存在 `log/`（完整时间线 + 纯报错两份），按天分文件：`info.2026-10-08.log` / `error.2026-10-08.log`，各保留最近 10 天，业务动作可追溯。
+
+### 8. ⚙️ 设置面板
+
+主窗口左侧边栏的齿轮（或托盘右键「设置…」）打开，两个页签：
+
+- **常规**：全局热键（唤起浮窗）与应用内快捷键（新建器件 / 聚焦搜索 / 删除器件）都可录制修改、应用即生效；数据库与日志的存放路径一键在资源管理器里打开（绿色便携版里它们就在程序旁边）；另有主题切换与托盘气泡开关；
+- **分类管理**：左栏是大类（如「电阻」），右栏列出挂在这个大类下面的器件——双击直接编辑、一键把新器件加进这个分类；删除分类**不会删器件**（器件变成「未分类」，随时重新归置）。
+
+器件本身的新建 / 编辑 / 删除在主窗口完成（表格右键、双击行、详情面板），设置里不再重复一份入口。
 
 ---
 
 ## <a id="quickstart"></a>🚀 快速开始与下载
 
-### 当前版本：`v1.0.1`
+### 当前版本：`v1.1.1`（源码已更新，Release 待发布）
 
 | 版本包 | 适用场景 | 说明 | 下载入口 |
 | :--- | :--- | :--- | :--- |
-| **绿色便携版（推荐）** | 所有用户 | 免安装，内置全部运行时，解压即用 | [⬇️ 下载 EDMS_Portable_v1.0.1.zip](https://github.com/silvance7/EDMS/releases/download/v1.0.1/EDMS_Portable_v1.0.1.zip) |
+| **绿色便携版（推荐）** | 所有用户 | 免安装，内置全部运行时，解压即用 | [⬇️ 下载 EDMS_Portable_v1.1.1.zip](https://github.com/silvance7/EDMS/releases/download/v1.1.1/EDMS_Portable_v1.1.1.zip) |
 | **历史版本归档** | 版本回溯 | 历史版本的二进制与说明 | [📂 浏览 Releases](https://github.com/silvance7/EDMS/releases) |
 | **源码运行** | 开发者 | 见下方「构建与开发」 | [📄 克隆仓库](https://github.com/silvance7/EDMS) |
 
 ### 便携版使用流程
 
-1. 下载 `EDMS_Portable_v1.0.1.zip`，**解压到一个独立文件夹**（建议不要直接放在桌面或下载目录）；
+1. 下载 `EDMS_Portable_v1.1.1.zip`，**解压到一个独立文件夹**（建议不要直接放在桌面或下载目录）；
 2. 双击文件夹内的 `EDMS.exe` 启动，程序仅驻留系统托盘，不占任务栏；
 3. 首次启动会在 **exe 所在目录**自动生成 `data/`（数据库与设置）——因此上一步建议单独建文件夹存放；日常备份直接复制 `data/inventory.db` 即可；
 4. 按 `Ctrl + Alt + E` 唤出检索浮窗，开始录入与查询；
@@ -261,9 +272,9 @@ uv run python -m PyInstaller build/build_portable.spec --noconfirm \
     --workpath build/_work --distpath dist
 
 # ── 测试（改完代码三个都跑）────────────────────────────
-.venv/Scripts/python.exe .workbuddy/tools/smoke_test.py   # 数据层（170 项断言）
+.venv/Scripts/python.exe .workbuddy/tools/smoke_test.py   # 数据层（187 项断言）
 uv run python .workbuddy/tools/smoke_test.py
-.venv/Scripts/python.exe .workbuddy/tools/ui_test.py      # 界面逻辑（197 项断言，无头）
+.venv/Scripts/python.exe .workbuddy/tools/ui_test.py      # 界面逻辑（236 项断言，无头）
 uv run python .workbuddy/tools/ui_test.py
 ```
 
@@ -271,7 +282,7 @@ uv run python .workbuddy/tools/ui_test.py
 
 ### 打包说明
 
-打包配置在 `build/build_portable.spec`，产出 `dist/EDMS/`（约 61 MB）：`onedir` 模式、不使用 UPX、剔除了 16 个用不到的二进制（软件 OpenGL 回退、OpenSSL、QtNetwork 等）。
+打包配置在 `build/build_portable.spec`，产出 `dist/EDMS/`（约 62 MB）：`onedir` 模式、不使用 UPX、剔除了 16 个用不到的二进制（软件 OpenGL 回退、OpenSSL、QtNetwork 等）。
 
 - **数据目录固定为 exe 旁的 `data/`**（`app/paths.py`），绝不放进 `_internal/`（重新打包会被覆盖）；
 - **重新打包前先备份 `dist/EDMS/data/`**：`--noconfirm` 会先删除整个 `dist/EDMS/`；
@@ -282,7 +293,7 @@ uv run python .workbuddy/tools/ui_test.py
 | 选择 | 原因 |
 | :--- | :--- |
 | SQLite + 冗余检索列，**不用 FTS5** | FTS5 的 `unicode61` 不切分中文、`trigram` 要求查询词 ≥3 字符；本应用规模下 `LIKE` 全表扫描仅 5–20 ms，行为可预期、零踩坑 |
-| domain 层**不 import Qt** | 核心逻辑可脱离界面单测（367 项断言即建立于此），将来更换整个界面层也无需改动业务代码 |
+| domain 层**不 import Qt** | 核心逻辑可脱离界面单测（423 项断言即建立于此），将来更换整个界面层也无需改动业务代码 |
 | `onedir` 而非 `onefile` | onefile 每次启动都要解压自身（冷启动 3–5 秒）；onedir 直接运行，且便于携带数据 |
 | 出库默认 **FIFO** | 常识性默认，减少批次堆积与过期；库存不足直接报错，绝不扣成负数 |
 
@@ -295,35 +306,42 @@ EDMS/
 ├── app/                            # 源码主体（分层：UI → domain → storage，依赖严格单向）
 │   ├── storage/                    #   SQLite 连接、建表与版本化迁移（唯一持有连接的地方）
 │   ├── domain/                     #   业务逻辑 —— 不 import 任何 Qt，可无头测试
-│   │   ├── part_service.py         #     器件主数据 + 检索列维护
+│   │   ├── models.py               #     数据类与 SearchQuery（纯数据，不含 Qt / SQL）
+│   │   ├── part_service.py         #     器件主数据 + 参数模板增删 + 检索列维护
 │   │   ├── stock_service.py        #     入库 / 出库（FIFO）/ 批量出库 / 盘点 / 报废
 │   │   ├── search_service.py       #     检索条件 -> SQL
-│   │   ├── tree_service.py         #     分类树、位置树
+│   │   ├── tree_service.py         #     分类树、位置树（递归子查询含全部子孙）
 │   │   ├── bom.py                  #     BOM 解析（列名自动识别）+ 归一化 + 打分匹配 + 成本折算
-│   │   └── part_io.py              #     器件清单导出（CSV）与导入（建档 + 入库）
+│   │   ├── part_io.py              #     器件清单导出（CSV）与导入（建档 + 入库）
+│   │   └── seed.py                 #     空库首次启动时写入默认分类 / 参数模板 / 位置
 │   ├── ui/                         #   PySide6 界面 —— 只调用 domain，不写 SQL
-│   │   ├── main_window.py          #     主管理窗口
+│   │   ├── main_window.py          #     主管理窗口（分类树 + 表格 + 详情 + 分类参数增删）
+│   │   ├── settings_dialog.py      #     设置面板（常规 / 分类管理 两页签）
+│   │   ├── category_manager.py     #     分类管理组件（左大类 / 右器件清单）
+│   │   ├── part_editor.py          #     器件新建 / 编辑表单（全项目唯一一套，三处复用）
+│   │   ├── dialog_base.py          #     EnterSafeDialog —— 拦住在输入框里敲回车导致的误提交
+│   │   ├── part_table_model.py     #     器件表格模型
 │   │   ├── quick_search.py         #     热键唤出的快速查询浮窗
 │   │   ├── bom_dialog.py           #     BOM 操作（比对 / 导出 / 导入 三页签）
 │   │   ├── bom_io.py               #     导出 / 导入面板
-│   │   ├── stock_dialog.py         #     入库 / 出库面板、分类与位置管理
+│   │   ├── stock_dialog.py         #     入库 / 出库面板、位置管理
 │   │   ├── hotkey.py               #     Win32 RegisterHotKey 封装
 │   │   ├── tray.py                 #     系统托盘与全局图标
 │   │   └── theme.py                #     浅色 / 深色主题
 │   ├── paths.py                    #   数据目录 / 日志目录解析（源码 / 打包两种形态）
-│   ├── log_setup.py                #   日志初始化（完整时间线 + 纯报错两份）
+│   ├── log_setup.py                #   日志初始化：按天分文件 info.<日期>.log + error.<日期>.log
+│   ├── config.py                   #   settings.json 读写（只认白名单里的键）
 │   └── main.py                     #   入口：托盘常驻 + 主窗口与浮窗懒加载
 ├── build/build_portable.spec       #   PyInstaller 打包配置
 ├── ico/                            #   程序图标（10 档尺寸）与源图
 ├── assets/                         #   README 用 Logo
-├── attachments/                    #   README 截图
-├── .workbuddy/tools/               #   开发与测试脚本（冒烟测试 / 界面测试 / 演示数据等）
-├── pyproject.toml / uv.lock        #   依赖声明与版本锁定
+├── attachments/                    #   README 截图（.workbuddy/shot_readme.py 一键重拍）
+├── .workbuddy/tools/               #   开发与测试脚本（冒烟测试 / 界面测试 / 打包 / 截图等）
+├── pyproject.toml / uv.lock        #   依赖声明与版本锁定（版本号三处同步：本文件 / app/__init__.py / 本 README）
 ├── requirements.txt                #   pip 用户入口（与 pyproject 同步）
 └── README.md / LICENSE
 ```
 
-> `data/`、`dist/`、`log/` 为运行产物，不进入版本库；`.gitignore` 中有逐条注释说明。
 
 ---
 
@@ -337,11 +355,11 @@ EDMS/
 
 ### 🤖 人机协同开发说明
 
-项目由开发者主导产品定位、交互取舍与验收测试，与 AI 智能体协作完成代码构建、界面打磨与自动化测试（367 项断言覆盖数据层与界面逻辑）。
+项目由开发者主导产品定位、交互取舍与验收测试，与 AI 智能体协作完成代码构建、界面打磨与自动化测试（423 项断言覆盖数据层与界面逻辑）。
 
 ### 📌 维护说明
 
-- **当前状态**：`main` 已发布 `v1.0.1`，核心的库存管理、快速查询与 BOM 操作链路已可用；
+- **当前状态**：`main` 开发中（最新源码 v1.1.1，GitHub Release 仍为 v1.0.1），核心的库存管理、快速查询与 BOM 操作链路已可用；
 - **后续计划**：位置二维码标签打印、嘉立创 EDA 集成（可行性待评估，目标：画图时直接查看库存）等；
 - **反馈渠道**：欢迎通过 [GitHub Issue](https://github.com/silvance7/EDMS/issues) 提交 Bug 报告与改进建议。
 

@@ -1,10 +1,16 @@
 """入库 / 出库面板。
 
-**入库不再是"先在表格里选中器件、再点入库"。** 点「入库 +」直接开面板，
-面板顶部就是器件搜索：
+**入库流程（2026-10-08 简化）**：点「入库 +」直接开面板，顶部就是器件搜索：
 
-    搜到   -> 选中它，往下填入库资料
-    搜不到 -> 列表最后一行是「＋ 新建器件「关键词」」，点它当场建，不用跳对话框
+    ① 选器件   —— 搜到就选中；搜不到，点「＋ 新建器件」打开完整器件表单
+    ② 入库资料 —— 数量 / 位置 / 单价 / 日期 / 厂商 / 供应商 / 备注
+
+「＋ 新建器件」用的是**完整器件表单**（分类 / 型号 / 封装 / 参数 / 关键词
+都能填），和主窗口、设置面板「分类管理」里是同一套逻辑，建完自动选中回来。
+原先只收 4 个字段的内嵌小表单已删除 —— 它就是"误建无属性器件"的来源。
+
+⚠️ **回车不提交**：本面板继承 EnterSafeDialog —— QDialog 的默认按钮会被
+任何输入框的回车触发，这里为此出过事故（根因与实验结论见 dialog_base.py）。
 
 **厂商记在批次上，不在器件上。** 同一个 10kΩ 电阻，YAGEO 买的和厚声买的是
 同一条器件记录，只是两条采购批次 —— 换厂牌不该逼你新建一个器件。
@@ -44,23 +50,16 @@ from PySide6.QtWidgets import (
 
 from app import config
 from app.domain import Services
-from app.domain.models import Part, SearchQuery
+from app.domain.models import SearchQuery
 from app.domain.stock_service import BulkInsufficientStockError
 from app.domain.tree_service import TreeService
 from app.ui import format_money, format_money_total, theme
-from app.ui.part_editor import build_category_labels
+from app.ui.dialog_base import EnterSafeDialog
+from app.ui.part_editor import PartEditorDialog, build_category_labels
 
 log = logging.getLogger("edms.ui.stock_dialog")
 
 ROLE_PART_ID = Qt.UserRole + 1
-ROLE_CREATE = Qt.UserRole + 2
-
-FOOTPRINT_PRESETS = [
-    "", "0201", "0402", "0603", "0805", "1206", "1210",
-    "SOT-23", "SOT-89", "SOP-8", "SOIC-8", "SSOP-20",
-    "LQFP-32", "LQFP-48", "LQFP-64", "QFN-32",
-    "TO-220", "TO-252", "DIP-8", "DO-214AC(SMA)",
-]
 
 
 def _today() -> str:
@@ -121,18 +120,22 @@ def combo_row(combo: QComboBox, on_manage) -> QWidget:
 class PartSearch(QWidget):
     """输入 -> 实时出结果 -> 选中。入库面板和「加器件」选择器共用。
 
-    `allow_create=True` 时，列表最后会多出一行「＋ 新建器件「关键词」」；
-    入库时搜不到就点它当场建，不用再跳一个对话框。
+    **不做"输入的名字自动建档"**：搜不到就是搜不到，建档走显式的
+    「＋ 新建器件」按钮（在入库面板上，打开完整器件表单）。以前搜不到会在
+    列表里塞一行「＋ 新建器件「关键词」」并自动高亮 —— 回车确认时，**同一个
+    按键事件**还会继续冒泡去触发对话框的默认按钮，「入库」当场落库：
+    光标还停在名称框里，器件已经带着默认数量 1 建好了（误建事故的源头）。
+
+    `empty_hint` 是"没搜到"时给用户的下一步提示（入库面板与选择器场景不同）。
     """
 
     picked = Signal(int)
-    create_wanted = Signal(str)
 
-    def __init__(self, services: Services, allow_create: bool = True,
-                 parent: QWidget | None = None) -> None:
+    def __init__(self, services: Services, parent: QWidget | None = None,
+                 empty_hint: str = "没找到") -> None:
         super().__init__(parent)
         self.svc = services
-        self.allow_create = allow_create
+        self.empty_hint = empty_hint
 
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
@@ -203,21 +206,13 @@ class PartSearch(QWidget):
                 node.setForeground(1, QColor(palette.fg_low))
             self.list.addTopLevelItem(node)
 
-        if self.allow_create and keyword:
-            node = QTreeWidgetItem([f"＋ 新建器件「{keyword}」", ""])
-            node.setData(0, ROLE_CREATE, True)
-            node.setForeground(0, QColor(palette.accent))
-            self.list.addTopLevelItem(node)
-
         if self.list.topLevelItemCount():
             self.list.setCurrentItem(self.list.topLevelItem(0))
 
         if rows:
             self.lbl_hint.setText(f"{len(rows)} 个匹配")
-        elif self.allow_create:
-            self.lbl_hint.setText("没找到。回车或点下面那行可以直接新建")
         else:
-            self.lbl_hint.setText("没找到")
+            self.lbl_hint.setText(self.empty_hint)
 
     # ------------------------------------------------------------------
 
@@ -229,9 +224,6 @@ class PartSearch(QWidget):
             self._on_item(item)
 
     def _on_item(self, item: QTreeWidgetItem) -> None:
-        if item.data(0, ROLE_CREATE):
-            self.create_wanted.emit(self.keyword())
-            return
         part_id = item.data(0, ROLE_PART_ID)
         if part_id is not None:
             self.picked.emit(int(part_id))
@@ -241,8 +233,11 @@ class PartSearch(QWidget):
 #  入库
 # ===========================================================================
 
-class StockInDialog(QDialog):
-    """入库面板：搜器件 -> 选中或现场新建 -> 填入库资料。"""
+class StockInDialog(EnterSafeDialog):
+    """入库面板：选器件（搜不到就点「＋ 新建器件」）-> 填入库资料。
+
+    继承 EnterSafeDialog：回车不会误触发「入库」默认按钮（见 dialog_base.py）。
+    """
 
     def __init__(self, services: Services, parent: QWidget | None = None,
                  preset_part_id: int | None = None,
@@ -250,7 +245,6 @@ class StockInDialog(QDialog):
         super().__init__(parent)
         self.svc = services
         self.part_id: int | None = None
-        self._creating = False
 
         self.setWindowTitle("入库")
         self.setMinimumWidth(600)
@@ -258,51 +252,34 @@ class StockInDialog(QDialog):
         root = QVBoxLayout(self)
         root.setSpacing(10)
 
-        # ---- 器件搜索 ----
-        box = QGroupBox("① 选器件（没有就直接新建）")
+        # ---- ① 选器件 ----
+        box = QGroupBox("① 选器件（没有就点「＋ 新建器件」）")
         box_layout = QVBoxLayout(box)
         box_layout.setContentsMargins(8, 8, 8, 8)
-        self.search = PartSearch(services, allow_create=True)
+        box_layout.setSpacing(6)
+        self.search = PartSearch(
+            services, empty_hint="没找到。要建新的，点下面的「＋ 新建器件」")
         self.search.picked.connect(self._on_picked)
-        self.search.create_wanted.connect(self._on_create)
         box_layout.addWidget(self.search)
+
+        new_row = QHBoxLayout()
+        new_row.setContentsMargins(0, 0, 0, 0)
+        self.btn_new_part = QPushButton("＋ 新建器件")
+        self.btn_new_part.setToolTip(
+            "打开完整器件表单（分类 / 型号 / 封装 / 参数 / 关键词都能填），\n"
+            "和设置面板「分类管理」里是同一套逻辑。\n"
+            "建好后自动选中它，接着往下填入库资料。"
+        )
+        # 包一层 lambda：clicked 带 bool，直接连会把 False 塞进形参
+        # （见 StockOutDialog.add_part 的坑：静默失效、按钮看着像没反应）。
+        self.btn_new_part.clicked.connect(lambda: self._new_part_dialog())
+        new_row.addWidget(self.btn_new_part)
+        new_row.addStretch(1)
+        box_layout.addLayout(new_row)
         root.addWidget(box)
 
-        # ---- 新建区（默认藏起来）----
-        self.gb_new = QGroupBox("② 新建器件信息")
-        new_form = QFormLayout(self.gb_new)
-        new_form.setLabelAlignment(Qt.AlignRight)
-
-        self.ed_new_name = QLineEdit()
-        new_form.addRow("名称 *", self.ed_new_name)
-
-        self.cb_new_category = QComboBox()
-        self.cb_new_category.addItem("（未分类）", None)
-        for cid, label in build_category_labels(services.tree):
-            self.cb_new_category.addItem(label, cid)
-        # 下拉框压短，右边留个「…」—— 没有这个入口，想加个分类就得
-        # 退出去主窗口右键建好、再回到入库面板从头填一遍
-        new_form.addRow("分类", combo_row(self.cb_new_category, self._manage_category))
-
-        self.cb_new_footprint = QComboBox()
-        self.cb_new_footprint.setEditable(True)
-        self.cb_new_footprint.addItems(FOOTPRINT_PRESETS)
-        new_form.addRow("封装", self.cb_new_footprint)
-
-        self.ed_new_mpn = QLineEdit()
-        self.ed_new_mpn.setPlaceholderText("厂商型号，可留空（BOM 匹配会用到）")
-        new_form.addRow("型号", self.ed_new_mpn)
-
-        mpn_hint = QLabel("名称尽量写全规格，例如「10kΩ 0603 1% 电阻」——检索和 BOM 匹配都靠它")
-        mpn_hint.setProperty("hint", True)
-        mpn_hint.setWordWrap(True)
-        new_form.addRow("", mpn_hint)
-
-        self.gb_new.hide()
-        root.addWidget(self.gb_new)
-
-        # ---- 入库资料 ----
-        gb_lot = QGroupBox("③ 入库资料")
+        # ---- ② 入库资料 ----
+        gb_lot = QGroupBox("② 入库资料")
         form = QFormLayout(gb_lot)
         form.setLabelAlignment(Qt.AlignRight)
 
@@ -409,29 +386,11 @@ class StockInDialog(QDialog):
 
     # ------------------------------------------------------------------
 
-    def _manage_category(self) -> None:
-        dlg = TreeManageDialog(self.svc, "category", self)
-        dlg.exec()
-        if dlg.changed:
-            self._reload_category_combo()
-
     def _manage_location(self) -> None:
         dlg = TreeManageDialog(self.svc, "location", self)
         dlg.exec()
         if dlg.changed:
             self._reload_location_combo()
-
-    def _reload_category_combo(self) -> None:
-        """管理完原地重填分类下拉，尽量保住正选着的那一个。"""
-        current = self.cb_new_category.currentData()
-        self.cb_new_category.clear()
-        self.cb_new_category.addItem("（未分类）", None)
-        for cid, label in build_category_labels(self.svc.tree):
-            self.cb_new_category.addItem(label, cid)
-        if current is not None:
-            idx = self.cb_new_category.findData(current)
-            if idx >= 0:
-                self.cb_new_category.setCurrentIndex(idx)
 
     def _reload_location_combo(self) -> None:
         current = self.cb_location.currentData()
@@ -492,8 +451,6 @@ class StockInDialog(QDialog):
 
     def _on_picked(self, part_id: int) -> None:
         self.part_id = part_id
-        self._creating = False
-        self.gb_new.hide()
 
         part = self.svc.parts.get(part_id)
         total = self.svc.stock.total_quantity(part_id)
@@ -507,47 +464,37 @@ class StockInDialog(QDialog):
             self.lbl_target.setText("　·　".join(bits))
         self._sync_ok()
 
-    def _on_create(self, keyword: str) -> None:
-        self.part_id = None
-        self._creating = True
-        self.ed_new_name.setText(keyword)
-        self.gb_new.show()
-        self.lbl_target.setText(f"将新建器件「{keyword}」")
-        self.ed_new_name.setFocus()
-        self.ed_new_name.selectAll()
-        self._sync_ok()
+    def _new_part_dialog(self) -> None:
+        """「＋ 新建器件」：打开完整器件表单，建完自动选中它。
+
+        表单（PartEditorDialog）和主窗口、设置面板「分类管理」里共用同一套 ——
+        分类 / 参数 / 关键词都能在里面填，从源头消灭"无属性器件"。
+        搜索框里已经敲的字会带进表单当默认名称。
+        """
+        dlg = PartEditorDialog(
+            self.svc.parts,
+            build_category_labels(self.svc.tree),
+            default_name=self.search.keyword(),
+            services=self.svc,
+            parent=self,
+        )
+        if not dlg.exec() or dlg.saved_part_id is None:
+            return
+        part = self.svc.parts.get(dlg.saved_part_id)
+        if part is not None:
+            # 搜索框切到新器件上（列表同步刷新），然后选中它继续填入库资料
+            self.search.ed_search.setText(part.name)
+        self.search.refresh()
+        self._on_picked(dlg.saved_part_id)
 
     def _sync_ok(self) -> None:
         button = self.findChild(QDialogButtonBox).button(QDialogButtonBox.Ok)
-        button.setEnabled(self.part_id is not None or self._creating)
+        button.setEnabled(self.part_id is not None)
 
     # ------------------------------------------------------------------
 
-    def _resolve_part(self) -> int | None:
-        """返回要入库的器件 id；需要新建时先建出来。"""
-        if not self._creating:
-            return self.part_id
-
-        name = self.ed_new_name.text().strip()
-        if not name:
-            QMessageBox.warning(self, "缺少名称", "新器件得有名字。")
-            self.ed_new_name.setFocus()
-            return None
-
-        try:
-            return self.svc.parts.create(Part(
-                name=name,
-                category_id=self.cb_new_category.currentData(),
-                mpn=self.ed_new_mpn.text().strip(),
-                footprint=self.cb_new_footprint.currentText().strip(),
-            ))
-        except Exception as exc:  # noqa: BLE001
-            log.exception("新建器件失败")
-            QMessageBox.critical(self, "新建器件失败", str(exc))
-            return None
-
     def _on_ok(self) -> None:
-        part_id = self._resolve_part()
+        part_id = self.part_id
         if part_id is None:
             return
 
@@ -611,7 +558,7 @@ class StockInDialog(QDialog):
         config.set_value("last_location_id", location_id)
         config.set_value("last_price_unit", self.cb_price_unit.currentData())
 
-        # 现场新建时要把真正的器件 id 记下来，调用方（主界面）靠它刷新表格
+        # 记下器件 id，调用方（主界面）靠它刷新表格并选中该器件
         self.part_id = part_id
         self.accept()
 
@@ -620,8 +567,8 @@ class StockInDialog(QDialog):
 #  出库
 # ===========================================================================
 
-class PartPickerDialog(QDialog):
-    """「加器件」用的选择器：搜到就选，不能新建（出库的前提是有货）。"""
+class PartPickerDialog(EnterSafeDialog):
+    """「加器件」用的选择器：搜到就选（出库的前提是有货，所以没有新建入口）。"""
 
     def __init__(self, services: Services, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -632,7 +579,7 @@ class PartPickerDialog(QDialog):
         self.setMinimumHeight(420)
 
         root = QVBoxLayout(self)
-        self.search = PartSearch(services, allow_create=False)
+        self.search = PartSearch(services)
         self.search.picked.connect(self._on_picked)
         root.addWidget(self.search)
 
@@ -669,7 +616,7 @@ ROLE_OUT_MISSING = Qt.UserRole + 5      # 该行有没有缺价（bool）
 ROLE_OUT_FIXABLE = Qt.UserRole + 6      # 该行能不能在这儿补价（bool）
 
 
-class StockOutDialog(QDialog):
+class StockOutDialog(EnterSafeDialog):
     """出库面板：可一次出多个器件，每行能指定从哪个批次扣，右下角给合计。
 
     合计按**实际扣到的批次单价**算（先模拟一次先进先出），不是均价的估算 ——

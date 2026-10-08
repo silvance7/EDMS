@@ -406,6 +406,23 @@ QGroupBox::title {{
     color: {p.fg_muted};
 }}
 
+/* ---- 左侧边栏（图标栏）----
+   常驻的细窄条：顶部应用图标，底部「设置」「折叠」。
+   折叠按钮只控制「分类」面板的显隐，栏本身永远在。 */
+QWidget#sideRail {{
+    background: {p.bg_group};
+    border-right: 1px solid {p.border};
+}}
+QToolButton#railButton {{
+    background: transparent;
+    border: none;
+    border-radius: 5px;
+    padding: 5px;
+}}
+QToolButton#railButton:hover {{ background: {p.bg_hover}; }}
+QToolButton#railButton:pressed {{ background: {p.bg_select}; }}
+QToolButton#railButton:checked {{ background: {p.bg_select}; }}
+
 /* ---- 其它 ---- */
 QSplitter::handle {{ background: {p.bg_window}; }}
 QSplitter::handle:horizontal {{ width: 4px; }}

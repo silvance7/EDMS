@@ -620,17 +620,17 @@ def main() -> None:
     dlg_tabs.close()
 
     # ================================================================
-    print("\n入库面板 · 分类 / 位置的下拉框与「…」管理入口")
+    print("\n入库面板 · 选器件区与位置管理入口")
     from app.ui.stock_dialog import TreeManageDialog
 
-    # 分类 / 位置下拉框被包进 combo_row（combo + 「…」按钮）
     probe_dlg = StockInDialog(svc)
-    check("分类下拉框旁边有「…」设置按钮",
-          any(b.text() == "…" for b in probe_dlg.cb_new_category.parentWidget()
-              .findChildren(QPushButton)))
-    check("位置下拉框旁边也有「…」设置按钮",
+    check("① 选器件区有「＋ 新建器件」按钮",
+          any(b.text() == "＋ 新建器件" for b in probe_dlg.findChildren(QPushButton)))
+    check("位置下拉框旁边有「…」设置按钮",
           any(b.text() == "…" for b in probe_dlg.cb_location.parentWidget()
               .findChildren(QPushButton)))
+    check("内嵌「新建器件信息」小表单已删除（误建源头）",
+          not hasattr(probe_dlg, "gb_new"))
     probe_dlg.close()
 
     dlg_cat = TreeManageDialog(svc, "category")
@@ -723,35 +723,25 @@ def main() -> None:
     pump(400)
     rows = dlg_in.search.list.topLevelItemCount()
     check("入库面板能搜到器件", rows >= 1, f"{rows} 项")
-    check("搜到时会附一个「新建」兜底项",
-          any(dlg_in.search.list.topLevelItem(i).data(0, Qt.UserRole + 2)
+    check("结果列表里不再有自动兜底行（误建源头已拆）",
+          all(dlg_in.search.list.topLevelItem(i).data(0, Qt.UserRole + 2) is None
               for i in range(rows)))
 
-    # 点「＋ 新建器件」那一行要真的展开新建区（上面只验了它存在，没验点得动）
-    dlg_in_row = StockInDialog(svc)
-    dlg_in_row.search.ed_search.setText("ZZZ库房里绝对没有的器件")
+    # 搜不到：只给提示，不搞兜底行，更不会"回车就建"
+    dlg_in_miss = StockInDialog(svc)
+    dlg_in_miss.search.ed_search.setText("ZZZ库房里绝对没有的器件")
     pump(400)
-    items = [dlg_in_row.search.list.topLevelItem(i)
-             for i in range(dlg_in_row.search.list.topLevelItemCount())]
-    create_items = [it for it in items if it.data(0, Qt.UserRole + 2)]
-    check("搜不到时列表里就一行「新建」兜底项", len(create_items) == 1,
-          f"{len(items)} 行，其中带新建标记 {len(create_items)} 行")
-    dlg_in_row.search.list.itemClicked.emit(create_items[0], 0)
-    pump(150)
-    check("点「＋ 新建器件」那一行会展开新建区", dlg_in_row.gb_new.isHidden() is False)
-    check("新建区带出了搜索关键词",
-          dlg_in_row.ed_new_name.text() == "ZZZ库房里绝对没有的器件")
-    check("点新建行后「入库」按钮可用",
-          ok_button(dlg_in_row).isEnabled())
-    dlg_in_row.close()
+    check("搜不到时列表为空", dlg_in_miss.search.list.topLevelItemCount() == 0)
+    check("搜不到时提示引导点「＋ 新建器件」",
+          "新建器件" in dlg_in_miss.search.lbl_hint.text(),
+          dlg_in_miss.search.lbl_hint.text())
+    dlg_in_miss.close()
 
     pid_10k = svc.db.query_one("SELECT id FROM part WHERE name LIKE '10k%'")["id"]
     dlg_in.search.picked.emit(pid_10k)
     pump(150)
     check("选中后记录了器件", dlg_in.part_id == pid_10k)
     check("选中后「入库」按钮可用", ok_button(dlg_in).isEnabled())
-    # 用 isHidden 而不是 isVisible：对话框没 exec() 时 isVisible 恒为 False
-    check("选中后收起新建区", dlg_in.gb_new.isHidden() is True)
 
     before = svc.stock.total_quantity(pid_10k)
     dlg_in.sp_qty.setValue(7)
@@ -773,26 +763,112 @@ def main() -> None:
     check("记住了这次的厂商，下次自动带出",
           app_config.load().get("last_manufacturer") == "YAGEO")
 
-    # ---- 入库：搜不到就现场新建 ----
-    dlg_in2 = StockInDialog(svc)
-    pump(150)
-    dlg_in2.search.create_wanted.emit("47kΩ 0402 1% 电阻")
-    pump(150)
-    check("新建区展开", dlg_in2.gb_new.isHidden() is False)
-    check("新建区带出了名称", dlg_in2.ed_new_name.text() == "47kΩ 0402 1% 电阻")
-    dlg_in2.cb_new_footprint.setCurrentText("0402")
+    # ---- 入库：「＋ 新建器件」打开完整表单（和设置里同一套），建完自动选中 ----
+    import app.ui.stock_dialog as sd_in_mod
+
+    captured: dict = {}
+
+    class _StubEditor:
+        """替掉真实器件表单：无头测试不能让模态框卡住。
+        模拟"用户在完整表单里建档成功"。"""
+
+        def __init__(self, parts, labels, default_name="", services=None,
+                     parent=None, **kw):
+            captured["default_name"] = default_name
+            captured["has_services"] = services is not None
+
+        def exec(self) -> int:
+            new_id = svc.parts.create(Part(name="47kΩ 0402 1% 电阻",
+                                           footprint="0402"))
+            captured["new_id"] = new_id
+            self.saved_part_id = new_id
+            return 1        # QDialog.Accepted
+
+    real_editor = sd_in_mod.PartEditorDialog
+    sd_in_mod.PartEditorDialog = _StubEditor
+    try:
+        dlg_in2 = StockInDialog(svc)
+        dlg_in2.search.ed_search.setText("47kΩ 0402 1% 电阻")
+        pump(300)
+        dlg_in2._new_part_dialog()
+        pump(150)
+    finally:
+        sd_in_mod.PartEditorDialog = real_editor
+
+    check("「＋ 新建器件」把搜索框里的词带进了表单",
+          captured.get("default_name") == "47kΩ 0402 1% 电阻", str(captured))
+    check("表单拿到 services（分类「…」要用）", captured.get("has_services") is True)
+    created_id = captured.get("new_id")
+    check("建档后自动选中为新入库目标", dlg_in2.part_id == created_id,
+          f"part_id={dlg_in2.part_id} / created={created_id}")
+    check("建档后「入库」按钮可用", ok_button(dlg_in2).isEnabled())
+
     dlg_in2.sp_qty.setValue(50)
     dlg_in2._on_ok()
     pump(150)
-
     created = svc.db.query_one("SELECT id, footprint FROM part WHERE name = ?",
                                ("47kΩ 0402 1% 电阻",))
-    check("搜不到时能现场新建并入库", created is not None)
-    check("新建时填的封装生效", created["footprint"] == "0402", created["footprint"])
-    check("新建的器件同时有了库存",
-          svc.stock.total_quantity(created["id"]) == 50,
-          str(svc.stock.total_quantity(created["id"])))
+    check("新建的器件能正常入库并有了库存",
+          created is not None and svc.stock.total_quantity(created["id"]) == 50,
+          str(svc.stock.total_quantity(created["id"])) if created else "器件没建出来")
     check("新建后记住器件 id", dlg_in2.part_id == created["id"])
+
+    # ---- 完整器件表单本体（入库按钮和设置页共用这一套） ----
+    from app.ui.part_editor import PartEditorDialog, build_category_labels
+
+    ed_dlg = PartEditorDialog(svc.parts, build_category_labels(svc.tree),
+                              default_name="预填名称探针", services=svc)
+    check("表单能带出默认名称（从搜索词来）",
+          ed_dlg.ed_name.text() == "预填名称探针", ed_dlg.ed_name.text())
+    ed_dlg.ed_name.setText("表单建档探针")
+    ed_dlg.cb_footprint.setCurrentText("0805")
+    ed_dlg._on_save()
+    form_saved = svc.db.query_one(
+        "SELECT id, footprint FROM part WHERE name='表单建档探针'")
+    check("表单保存建档成功（含封装）",
+          form_saved is not None and form_saved["footprint"] == "0805",
+          str(dict(form_saved)) if form_saved else "没有建档")
+    ed_dlg.close()
+
+    # ================================================================
+    print("\n回车守卫（EnterSafeDialog）—— 回车不再误触发「入库」")
+    from PySide6.QtTest import QTest
+
+    dlg_enter = StockInDialog(svc)
+    dlg_enter.search.ed_search.setText("10k")
+    pump(300)
+    lots_before = svc.db.query_one("SELECT COUNT(*) AS n FROM stock_lot")["n"]
+
+    # 搜索框回车：选中第一条（正常功能保留），但不提交
+    QTest.keyClick(dlg_enter.search.ed_search, Qt.Key_Return)
+    pump(150)
+    check("搜索框回车 = 选中第一条，不落库",
+          dlg_enter.part_id == pid_10k and dlg_enter.result() == 0
+          and svc.db.query_one("SELECT COUNT(*) AS n FROM stock_lot")["n"] == lots_before,
+          f"part_id={dlg_enter.part_id} result={dlg_enter.result()}")
+
+    # 数量框回车：当年误建的场景（默认按钮被回车触发）—— 现在不落库
+    QTest.keyClick(dlg_enter.sp_qty, Qt.Key_Return)
+    pump(150)
+    check("数量框回车不再触发「入库」",
+          dlg_enter.result() == 0
+          and svc.db.query_one("SELECT COUNT(*) AS n FROM stock_lot")["n"] == lots_before)
+    dlg_enter.close()
+
+    # 焦点在「入库」按钮上时回车仍要能提交（别误吞）—— 需要 show 才有焦点
+    dlg_focus = StockInDialog(svc)
+    dlg_focus.search.picked.emit(pid_10k)
+    pump(150)
+    dlg_focus.show()
+    pump(100)
+    okb = ok_button(dlg_focus)
+    okb.setFocus()
+    pump(50)
+    QTest.keyClick(okb, Qt.Key_Return)
+    pump(150)
+    check("焦点在「入库」按钮上回车照常提交", dlg_focus.result() == 1,
+          f"result={dlg_focus.result()}")
+    dlg_focus.close()
 
     # ---- 出库：一次多个器件 ----
     pid_cap = svc.db.query_one("SELECT id FROM part WHERE name LIKE '100nF%'")["id"]
@@ -1210,6 +1286,255 @@ def main() -> None:
           "现有这些" in dlg_cap.table.item(0, 5).toolTip(),
           dlg_cap.table.item(0, 5).toolTip())
     dlg_cap.close()
+
+    # ================================================================
+    print("\n左侧边栏 · 折叠 / 未分类节点 / 删除反馈")
+
+    # ---- 侧栏折叠 ----
+    check("侧栏存在且「分类」面板默认展开",
+          hasattr(win, "side_rail") and not win.category_pane.isHidden())
+    win.toggle_category_pane()
+    check("点折叠后「分类」面板隐藏", win.category_pane.isHidden())
+    check("折叠状态写进 settings.json",
+          app_config.load().get("category_visible") is False)
+    win.toggle_category_pane()
+    check("再点恢复展开", not win.category_pane.isHidden())
+    check("展开状态写回 settings.json",
+          app_config.load().get("category_visible") is True)
+
+    # ---- 「未分类」虚拟节点 ----
+    from app.ui.main_window import ROLE_ID as WIN_ROLE_ID, UNCATEGORIZED_ID
+
+    win._clear_filters()
+    probe_uncat = svc.parts.create(Part(name="未分类节点探针"))
+    win.reload_all()
+    root = win.tree.topLevelItem(0)
+    uncat_nodes = [root.child(i) for i in range(root.childCount())
+                   if root.child(i).data(0, WIN_ROLE_ID) == UNCATEGORIZED_ID]
+    check("存在未分类器件时出现「未分类」节点", len(uncat_nodes) == 1)
+    want_uncat = svc.search.count(SearchQuery(uncategorized=True))
+    check("节点标签带计数", uncat_nodes[0].text(0) == f"未分类（{want_uncat}）",
+          uncat_nodes[0].text(0))
+    win.tree.setCurrentItem(uncat_nodes[0])
+    win._reload_table()
+    check("选中未分类节点只显示未分类器件",
+          win.model.rowCount() == want_uncat,
+          f"界面 {win.model.rowCount()} / 预期 {want_uncat}")
+    check("未分类探针就在其中",
+          any(win.model.row_at(i).id == probe_uncat
+              for i in range(win.model.rowCount())))
+
+    # 全部归类后节点消失
+    resistor_cat = next(c.id for c in svc.tree.list_categories() if c.name == "电阻")
+    for row in svc.db.query("SELECT id, name FROM part WHERE category_id IS NULL"):
+        svc.parts.update(Part(id=row["id"], name=row["name"],
+                              category_id=resistor_cat))
+    win.reload_all()
+    root = win.tree.topLevelItem(0)
+    check("全部归类后「未分类」节点消失",
+          not any(root.child(i).data(0, WIN_ROLE_ID) == UNCATEGORIZED_ID
+                  for i in range(root.childCount())))
+    win.tree.setCurrentItem(root)
+    win._reload_table()
+
+    # ---- 删除：修掉"静默失效" ----
+    # 场景：详情盯着的器件被当前筛选挡住（表格里没选中行）—— 也要能删
+    doomed = svc.parts.create(Part(name="待删静默回归器件"))
+    win.reload_all()
+    win._selected_part_id = doomed
+    win.table.clearSelection()
+    check("场景就位：表格里没有选中行",
+          not win.table.selectionModel().hasSelection())
+    win.delete_selected_part()      # QMessageBox.question 已在顶部打桩为 Yes
+    check("没有表格选中行也能删（静默失效已修）", svc.parts.get(doomed) is None)
+
+    # 没选中时：按钮路径给提示、快捷键路径安静
+    asked: list[str] = []
+    real_info = QMessageBox.information
+    QMessageBox.information = staticmethod(
+        lambda *a, **k: asked.append(a[1] if len(a) > 1 else ""))
+    try:
+        win._selected_part_id = None
+        win.delete_selected_part(notify=True)     # 按钮路径
+        check("按钮路径没选中会给提示", len(asked) == 1, str(asked))
+        win.delete_selected_part()                # 快捷键路径（静默）
+        check("快捷键路径同场景保持安静", len(asked) == 1, str(asked))
+    finally:
+        QMessageBox.information = real_info
+
+    # ================================================================
+    print("\n设置面板")
+    from PySide6.QtGui import QKeySequence
+    from app.ui.settings_dialog import SettingsDialog
+
+    hook_calls: list[str] = []
+
+    def fake_hk_apply(spec: str):
+        hook_calls.append(spec)
+        return True, f"已生效：{spec.upper()}"
+
+    def fake_hk_fail(spec: str):
+        return False, "热键注册失败，可能已被其它程序占用"
+
+    def fake_hk_current():
+        return "CTRL + ALT + E"
+
+    settings = SettingsDialog(svc, win, hotkey_apply=fake_hk_apply,
+                              hotkey_current=fake_hk_current)
+    check("设置面板两个页签（器件资料页已移除）",
+          settings.tabs.count() == 2
+          and [settings.tabs.tabText(i) for i in range(2)] == ["常规", "分类管理"],
+          str([settings.tabs.tabText(i) for i in range(settings.tabs.count())]))
+    check("数据库地址显示为 data 目录",
+          settings.ed_db_dir.text() == str(svc.db.db_path.parent),
+          settings.ed_db_dir.text())
+    from app.paths import log_dir
+    check("日志地址显示为 log 目录",
+          settings.ed_log_dir.text() == str(log_dir()))
+
+    opened_dirs: list[str] = []
+    settings._open_folder = lambda p: opened_dirs.append(str(p))
+    settings._open_folder(svc.db.db_path.parent)
+    check("「打开文件夹」走可覆写方法（测试不碰 Qt 静态方法）",
+          opened_dirs == [str(svc.db.db_path.parent)], str(opened_dirs))
+
+    settings.ed_hotkey.setKeySequence(QKeySequence("Ctrl+Alt+Q"))
+    settings._apply_hotkey()
+    check("换键成功：hook 收到规范化写法", hook_calls == ["ctrl+alt+q"], str(hook_calls))
+    check("换键成功后清空输入框", settings.ed_hotkey.keySequence().isEmpty())
+
+    settings_bad = SettingsDialog(svc, win, hotkey_apply=fake_hk_fail,
+                                  hotkey_current=fake_hk_current)
+    settings_bad.ed_hotkey.setKeySequence(QKeySequence("Ctrl+Alt+Q"))
+    settings_bad._apply_hotkey()
+    check("换键失败会显示原因", "占用" in settings_bad.lbl_hotkey_status.text(),
+          settings_bad.lbl_hotkey_status.text())
+    settings_bad.close()
+
+    settings_ro = SettingsDialog(svc, win)      # 没有 hooks（单测环境）
+    check("无 hooks 时热键区只读（不给假按钮）",
+          not settings_ro.btn_apply_hotkey.isEnabled())
+    settings_ro.close()
+
+    # 应用内快捷键：改 → 应用 → QAction 与 settings.json 同步 → 恢复默认
+    settings.ed_sc_new.setKeySequence(QKeySequence("Ctrl+M"))
+    settings._apply_inapp_shortcuts()
+    check("应用内快捷键写进 QAction",
+          win._act_new.shortcut().toString() == "Ctrl+M",
+          win._act_new.shortcut().toString())
+    check("应用内快捷键写进 settings.json",
+          app_config.load().get("shortcut_new_part") == "Ctrl+M")
+    settings._reset_inapp_shortcuts()
+    check("恢复默认后回到 Ctrl+N",
+          win._act_new.shortcut().toString() == "Ctrl+N"
+          and app_config.load().get("shortcut_new_part") == "Ctrl+N")
+
+    # 分类页的器件入口：双击编辑 / 「添加器件到分类」。
+    # 这里把 PartEditorDialog 换成**假类** —— 真表单是模态的，无头环境没人点
+    # 会挂死（模块属性替换在这两个方法里有效：它们运行时才查全局名）。
+    from app.ui import settings_dialog as sd_mod
+    editor_calls: list[tuple] = []
+
+    class _FakeEditor:
+        def __init__(self, parts, labels, part_id=None, default_category_id=None,
+                     default_name="", services=None, parent=None):
+            editor_calls.append((part_id, default_category_id))
+
+        def exec(self):
+            return False           # 模拟"用户取消"，不触发刷新路径
+
+    probe_entry = svc.parts.create(Part(name="分类入口探针"))
+    real_editor = sd_mod.PartEditorDialog
+    sd_mod.PartEditorDialog = _FakeEditor
+    try:
+        settings._edit_part_from_category(probe_entry)
+        check("分类页双击器件 → 打开编辑表单并带上该器件 id",
+              editor_calls[-1] == (probe_entry, None), str(editor_calls))
+
+        some_cat = svc.db.query_one("SELECT id FROM category LIMIT 1")["id"]
+        settings._add_part_from_category(some_cat)
+        check("分类页「添加器件」→ 新建表单且预选当前分类",
+              editor_calls[-1] == (None, some_cat), str(editor_calls))
+    finally:
+        sd_mod.PartEditorDialog = real_editor
+        svc.parts.delete(probe_entry)
+        pump(50)
+
+    # 分类管理页：新建一级 → 右栏器件清单 → 删一级（器件变未分类，不删器件）
+    from app.ui.category_manager import ROLE_CAT_ID, ROLE_PART_ID
+    from PySide6.QtWidgets import QInputDialog
+
+    cat_mgr = settings.category_manager
+    n_l1 = cat_mgr.list_l1.count()
+    real_gettext = QInputDialog.getText
+    QInputDialog.getText = staticmethod(lambda *a, **k: ("冒烟一级分类", True))
+    try:
+        cat_mgr._add_l1()
+        pump(100)
+    finally:
+        QInputDialog.getText = real_gettext
+    check("分类管理能新建一级", cat_mgr.list_l1.count() == n_l1 + 1)
+    new_l1 = svc.db.query_one("SELECT id FROM category WHERE name='冒烟一级分类'")
+    check("一级分类落库", new_l1 is not None)
+
+    cat_mgr.reload()
+    for i in range(cat_mgr.list_l1.count()):
+        if cat_mgr.list_l1.item(i).data(ROLE_CAT_ID) == new_l1["id"]:
+            cat_mgr.list_l1.setCurrentRow(i)
+            break
+    pump(50)
+
+    # 空态：右栏给出"还没有器件"的占位行（不可选中），不再是一栏空白
+    from PySide6.QtCore import Qt as _Qt
+    _empty_flags = cat_mgr.list_parts.item(0).flags()
+    check("空分类右栏给占位提示行",
+          cat_mgr.list_parts.count() == 1
+          and not (_empty_flags & _Qt.ItemFlag.ItemIsSelectable)
+          and "还没有器件" in cat_mgr.list_parts.item(0).text())
+
+    # 往该分类挂一个器件 → 右栏列出它（带库存数）
+    probe_cat = svc.parts.create(Part(name="分类器件探针",
+                                      category_id=new_l1["id"]))
+    cat_mgr.reload()
+    for i in range(cat_mgr.list_l1.count()):
+        if cat_mgr.list_l1.item(i).data(ROLE_CAT_ID) == new_l1["id"]:
+            cat_mgr.list_l1.setCurrentRow(i)
+            break
+    pump(50)
+    check("右栏列出挂在该分类下的器件",
+          cat_mgr.list_parts.count() == 1
+          and cat_mgr.list_parts.item(0).text().startswith("分类器件探针（0）")
+          and cat_mgr.list_parts.item(0).data(ROLE_PART_ID) == probe_cat)
+
+    # 双击行 / 「添加器件」按钮 → 宿主槽会开**模态**编辑器（真实行为）。
+    # 构造 settings 时旧槽已经连在信号上，必须先断开，再连探针 ——
+    # 只验证"信号带对了参数"，绝不真开对话框（模态循环没人点会挂死）。
+    cat_mgr.part_activated.disconnect()
+    cat_mgr.add_part_requested.disconnect()
+    opened: list[tuple[str, int]] = []
+    cat_mgr.part_activated.connect(lambda pid: opened.append(("edit", pid)))
+    cat_mgr.add_part_requested.connect(lambda cid: opened.append(("add", cid)))
+    cat_mgr._on_part_double_clicked(cat_mgr.list_parts.item(0))
+    check("双击器件行触发宿主编辑（带器件 id）",
+          opened == [("edit", probe_cat)], f"opened={opened}")
+    cat_mgr._add_part_to_current()
+    check("「添加器件」按钮触发宿主新建（预选当前分类）",
+          opened == [("edit", probe_cat), ("add", new_l1["id"])],
+          f"opened={opened}")
+
+    # 删一级分类：挂在它下面的器件**不删**，只是变未分类（口径不变）
+    cat_mgr._delete_l1()        # QMessageBox.question 已打桩 Yes
+    pump(100)
+    check("删一级分类生效",
+          svc.db.query_one("SELECT id FROM category WHERE id = ?",
+                           (new_l1["id"],)) is None)
+    check("器件没被删，只是变成未分类",
+          svc.parts.get(probe_cat) is not None
+          and svc.parts.get(probe_cat).category_id is None)
+    check("分类增删后标记 parts_changed（关面板时主窗口整体刷新）",
+          settings.parts_changed is True)
+    svc.parts.delete(probe_cat)  # 清理探针
+    settings.close()
 
     for dialog in (dlg_in, dlg_in2, dlg_out, dlg_out2, dlg_out3, dlg_click,
                    dlg_price, dlg_price2):

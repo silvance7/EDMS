@@ -93,7 +93,7 @@ class BomLine:
 
     @property
     def value_text(self) -> str:
-        """用来做数值匹配的文本。KiCad 的 Comment 和 Value 经常只有一个填了。"""
+        """用来做数值匹配的文本。不同工具导出时，Comment 和 Value 经常只有一个填了。"""
         return self.comment or self.value
 
 
@@ -458,7 +458,7 @@ def primary_footprint(footprint: str) -> str:
         return ""
 
     fp = footprint.strip().lower()
-    # KiCad 有时写 "Library:Footprint"
+    # 部分 EDA 工具会写成 "库名:封装名"
     if ":" in fp:
         fp = fp.rsplit(":", 1)[1]
 
@@ -499,7 +499,7 @@ def is_standard_footprint(token: str) -> bool:
     """这个归一化后的封装是不是**算法认得的**标准封装。
 
     只有两侧都是标准封装时，才拿封装去做强校验。原因：
-    用户会在 KiCad 里自己画封装（`0.96OLED_4P`、`SMD-PCB`、`ROCKER_16*16_KEY_JX`），
+    用户会在 EDA 里自己画封装（`0.96OLED_4P`、`SMD-PCB`、`ROCKER_16*16_KEY_JX`），
     这些名字算法根本没法判断对应关系。硬卡会把"其实有货"错判成缺料 ——
     实测把缺料从 30 行推到了 39 行，其中好几行库里的确有货。
     这类只标警告，让用户自己看。
@@ -635,7 +635,7 @@ def _read_xlsx(path: Path) -> tuple[list[str], list[list[str]]]:
 
 
 def _read_csv(path: Path) -> tuple[list[str], list[list[str]]]:
-    """读 CSV。KiCad 导出的 CSV 可能是 utf-8-sig 也可能是 GBK，都试一遍。"""
+    """读 CSV。不同工具导出的编码不一（utf-8-sig / GBK 都遇到过），都试一遍。"""
     raw = path.read_bytes()
     for encoding in ("utf-8-sig", "utf-8", "gbk", "utf-16"):
         try:

@@ -398,7 +398,7 @@ def main() -> None:
           not is_standard_footprint("0.96oled")
           and not is_standard_footprint("smd-pcb")
           and not is_standard_footprint("hdr-th"),
-          "KiCad 里自己画的封装名不该算标准封装")
+          "自己画的封装名（如 0.96OLED_4P）不该算标准封装")
 
     custom = svc.parts.create(
         Part(name="0.96 寸 OLED 模块", category_id=resistor.id, footprint="DIP-4"))

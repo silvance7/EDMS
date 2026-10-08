@@ -151,7 +151,7 @@ class MainWindow(QMainWindow):
         self.btn_bom = QPushButton("BOM 操作")
         self.btn_bom.setToolTip(
             "打开 BOM 操作中心（三个页签）：\n"
-            "· 比对 —— 载入 KiCad 导出的 BOM（.xlsx / .csv），对照库存逐行匹配，\n"
+            "· 比对 —— 载入嘉立创 EDA 导出的 BOM（.xlsx / .csv），对照库存逐行匹配，\n"
             "  之后一键全出库，缺料的行还能一键建档\n"
             "· 导出 —— 把当前库存的全部器件导成一份 CSV 清单\n"
             "· 导入 —— 从清单文件批量导入器件（没有的建档，带数量的按批次入库）"

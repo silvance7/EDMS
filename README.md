@@ -266,10 +266,8 @@ uv run python -m app.main --check
 # ── 打包（绿色便携版）─────────────────────────────────
 # ⚠️ 换过图标 / 改过 spec 后，先删除 build/_work 再打包 —— PyInstaller 会复用
 #    上一次的 EXE 构建缓存，不清缓存的话新图标不会进包（实测踩过）
-.venv/Scripts/python.exe -m PyInstaller build/build_portable.spec --noconfirm \
-    --workpath build/_work --distpath dist
-uv run python -m PyInstaller build/build_portable.spec --noconfirm \
-    --workpath build/_work --distpath dist
+.venv/Scripts/python.exe -m PyInstaller build/build_portable.spec --noconfirm  --workpath build/_work --distpath dist
+uv run python -m PyInstaller build/build_portable.spec --noconfirm --workpath build/_work --distpath dist
 
 # ── 测试（改完代码三个都跑）────────────────────────────
 .venv/Scripts/python.exe .workbuddy/tools/smoke_test.py   # 数据层（187 项断言）
